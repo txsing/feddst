@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 def distribute_clients_categorical(x, p, clients=400, beta=0.1):
 
-    unique, counts = torch.Tensor(x.targets).unique(return_counts=True)
+    unique, counts = torch.Tensor(x.targets.float()).unique(return_counts=True)
 
     # Generate offsets within classes
     offsets = np.cumsum(np.broadcast_to(counts[:, np.newaxis], p.shape) * p, axis=1).astype('uint64')
@@ -41,8 +41,7 @@ def distribute_clients_dirichlet(train, test, clients=400, batch_size=32, beta=0
     '''
 
     rng = np.random.default_rng(rng)
-
-    unique = torch.Tensor(train.targets).unique()
+    unique = torch.Tensor(train.targets.float()).unique()
 
     # Generate Dirichlet samples
     alpha = np.ones(clients) * beta
@@ -63,12 +62,17 @@ def distribute_iid(train, test, clients=400, samples_per_client=40, batch_size=3
 
     train_idx = np.arange(len(train.targets))
     rng.shuffle(train_idx)
+    if samples_per_client < 1:
+        samples_per_client = int(len(train.targets) / clients)
+    print(f"samples_per_client: {samples_per_client}")
     train_idx = train_idx[:clients*samples_per_client]
     train_idx = train_idx.reshape((clients, samples_per_client))
 
     test_idx = np.arange(len(test.targets))
     rng.shuffle(test_idx)
-    test_idx = test_idx.reshape((clients, int(len(test_idx) / clients)))
+    test_samples_per_client = int(len(test.targets) / clients)
+    test_idx = test_idx[:clients*test_samples_per_client]
+    test_idx = test_idx.reshape((clients, test_samples_per_client))
 
     return train_idx, test_idx
 
@@ -211,7 +215,7 @@ def get_emnist(path='../leaf/data/femnist/data', min_samples=0, batch_size=32,
         fn = os.path.join(path, EMNIST_SUBDIR, fn)
         with open(fn) as f:
             subset = json.load(f)
-
+        print(len(subset['users']))
         for uid in subset['users']:
             user_data = subset['user_data'][uid]
             data_x = (torch.FloatTensor(x).reshape((1, 28, 28)) for x in user_data['x'])

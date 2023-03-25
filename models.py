@@ -93,11 +93,10 @@ class PrunableNet(nn.Module):
     def _weights_by_layer(self, sparsity=0.1, sparsity_distribution='erk'):
         with torch.no_grad():
             layer_names = []
-            sparsities = np.empty(len(list(self.named_children())))
-            n_weights = np.zeros_like(sparsities, dtype=np.int)
+            sparsities = np.empty(len(list(self.named_children()))) # 3层layers => sparsities: [S1, S2, S3] 
+            n_weights = np.zeros_like(sparsities, dtype=int)
 
             for i, (name, layer) in enumerate(self.named_children()):
-
                 layer_names.append(name)
                 for pname, param in layer.named_parameters():
                     n_weights[i] += param.numel()
@@ -196,7 +195,7 @@ class PrunableNet(nn.Module):
                 n_nonzero = 0
                 for bname, buf in layer.named_buffers():
                     n_nonzero += buf.count_nonzero().item()
-                n_grow = int(weights_by_layer[name] - n_nonzero)
+                n_grow = int(weights_by_layer[name] - n_nonzero) # 期望的非0参数的个数
                 if n_grow < 0:
                     continue
                 #print('grow from', n_nonzero, 'to', weights_by_layer[name])
@@ -592,8 +591,8 @@ class Conv2(PrunableNet):
 
 all_models = {
         'mnist': MNISTNet,
+        # 'mnist': Conv2,
         'emnist': Conv2,
         'cifar10': CIFAR10Net,
         'cifar100': CIFAR100Net
 }
-

@@ -61,16 +61,20 @@ parser.add_argument('--momentum', default=0.9, type=float, help='Local client SG
 parser.add_argument('--cache-test-set', default=False, action='store_true', help='Load test sets into memory')
 parser.add_argument('--cache-test-set-gpu', default=False, action='store_true', help='Load test sets into GPU memory')
 parser.add_argument('--test-batches', default=0, type=int, help='Number of minibatches to test on, or 0 for all of them')
-parser.add_argument('--eval-every', default=10, type=int, help='Evaluate on test set every N rounds')
+parser.add_argument('--eval-every', default=50, type=int, help='Evaluate on test set every N rounds')
 parser.add_argument('--device', default='0', type=device_list, help='Device to use for compute. Use "cpu" to force CPU. Otherwise, separate with commas to allow multi-GPU.')
 parser.add_argument('--min-votes', default=0, type=int, help='Minimum votes required to keep a weight')
 parser.add_argument('--no-eval', default=True, action='store_false', dest='eval')
 parser.add_argument('--grasp', default=False, action='store_true')
 parser.add_argument('--fp16', default=False, action='store_true', help='upload as fp16')
-parser.add_argument('-o', '--outfile', default='output.log', type=argparse.FileType('a', encoding='ascii'))
+parser.add_argument('-o', '--outfile', default='output', type=str)
+# parser.add_argument('-o', '--outfile', default='output', type=argparse.FileType('a', encoding='ascii'))
 
 
 args = parser.parse_args()
+flog = open(args.outfile+'.log', 'w')
+fcsv = open(args.outfile+'.csv', 'w')
+
 devices = [torch.device(x) for x in args.device]
 args.pid = os.getpid()
 
@@ -78,16 +82,19 @@ if args.rate_decay_end is None:
     args.rate_decay_end = args.rounds // 2
 if args.final_sparsity is None:
     args.final_sparsity = args.sparsity
+if args.sparsity <= 0 :
+    args.readjustment_ratio = 0
 
-def print2(*arg, **kwargs):
-    print(*arg, **kwargs, file=args.outfile)
+def print_to_log(*arg, **kwargs):
+    print(*arg, **kwargs, file=flog)
     print(*arg, **kwargs)
 
-def dprint(*args, **kwargs):
-    print(*args, **kwargs, file=sys.stderr)
+def print_to_csv(*arg, **kwargs):
+    print(*arg, **kwargs, file=fcsv)
+    print(*arg, **kwargs)
 
 def print_csv_line(**kwargs):
-    print2(','.join(str(x) for x in kwargs.values()))
+    print_to_csv(','.join(str(x) for x in kwargs.values()))
 
 def nan_to_num(x, nan=0, posinf=0, neginf=0):
     x = x.clone()
@@ -96,8 +103,29 @@ def nan_to_num(x, nan=0, posinf=0, neginf=0):
     x[x == float('inf')] = posinf
     return x.clone()
 
+def evaluate_global_model(global_model, loaders):
+    global_test_data = []
+    for _, (_, client_loaders) in enumerate(loaders.items()):
+        _, _, test_data = client_loaders
+        global_test_data += test_data
+    with torch.no_grad():
+        correct = 0.
+        total = 0.
+        _model = global_model.to(devices[0])
+        _model.eval()
+        with torch.no_grad():
+            for i, (inputs, labels) in enumerate(global_test_data):
+                if not args.cache_test_set_gpu:
+                    inputs = inputs.to(devices[0])
+                    labels = labels.to(devices[0])
+                outputs = _model(inputs)
+                outputs = torch.argmax(outputs, dim=-1)
+                correct += sum(labels == outputs)
+                total += len(labels)
+        global_model_acc = correct / total 
+    return global_model_acc
 
-def evaluate_global(clients, global_model, progress=False, n_batches=0):
+def evaluate_global_clients(clients, global_model, loaders, progress=False, n_batches=0):
     with torch.no_grad():
         accuracies = {}
         sparsities = {}
@@ -110,7 +138,7 @@ def evaluate_global(clients, global_model, progress=False, n_batches=0):
         for client_id, client in enumerator:
             accuracies[client_id] = client.test(model=global_model).item()
             sparsities[client_id] = client.sparsity()
-
+        
     return accuracies, sparsities
 
 
@@ -136,7 +164,7 @@ def evaluate_local(clients, global_model, progress=False, n_batches=0):
 
 
 # Fetch and cache the dataset
-dprint('Fetching dataset...')
+print('Fetching dataset...')
 cache_devices = devices
 
 '''
@@ -154,7 +182,6 @@ else:
 loaders = get_dataset(args.dataset, clients=args.total_clients, mode=args.distribution,
                       beta=args.beta, batch_size=args.batch_size, devices=cache_devices,
                       min_samples=args.min_samples, samples=args.samples_per_client)
-
 class Client:
 
     def __init__(self, id, device, train_data, test_data, net=models.MNISTNet,
@@ -244,6 +271,7 @@ class Client:
             self.net.train()
 
             running_loss = 0.
+
             for inputs, labels in self.train_data:
                 inputs = inputs.to(self.device)
                 labels = labels.to(self.device)
@@ -269,7 +297,7 @@ class Client:
 
                 self.net.layer_prune(sparsity=prune_sparsity, sparsity_distribution=args.sparsity_distribution)
                 self.net.layer_grow(sparsity=sparsity, sparsity_distribution=args.sparsity_distribution)
-                ul_cost += (1-self.net.sparsity()) * self.net.mask_size # need to transmit mask
+                ul_cost += (1-self.net.sparsity()) * self.net.mask_size # need to transmit mask, unit: bit
             self.curr_epoch += 1
 
         # we only need to transmit the masked weights and all biases
@@ -319,14 +347,16 @@ class Client:
 
 
 # initialize clients
-dprint('Initializing clients...')
+print('Initializing clients...')
 clients = {}
 client_ids = []
 
-for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
+# for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
+for i, (client_id, client_loaders) in enumerate(loaders.items()):
     cl = Client(client_id, *client_loaders, net=all_models[args.dataset],
                 learning_rate=args.eta, local_epochs=args.epochs,
                 target_sparsity=args.sparsity)
+    print(f"Client-{client_id}: {len(cl.train_data)} iters/epoch")
     clients[client_id] = cl
     client_ids.append(client_id)
     torch.cuda.empty_cache()
@@ -335,7 +365,7 @@ for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
 global_model = all_models[args.dataset](device='cpu')
 initialize_mask(global_model)
 
-# execute grasp on one client if needed
+# execute grasp on one client if needed (by default: False)
 if args.grasp:
     client = clients[client_ids[0]]
     from grasp import grasp
@@ -367,15 +397,18 @@ compute_times = np.zeros(len(clients)) # time in seconds taken on client-side fo
 download_cost = np.zeros(len(clients))
 upload_cost = np.zeros(len(clients))
 
+print(f'Total clients: {clients.keys()}')
 # for each round t = 1, 2, ... do
-for server_round in tqdm(range(args.rounds)):
-
+# for server_round in tqdm(range(args.rounds)): # 默认 400
+cumulative_ul,cumulative_dl = 0, 0
+for server_round in range(args.rounds): # 默认 400
     # sample clients
-    client_indices = rng.choice(list(clients.keys()), size=args.clients)
+    client_indices = rng.choice(list(clients.keys()), size=args.clients, replace=False)
+    print_to_log(f"Selected clients: {client_indices} at round {server_round+1}")
 
     global_params = global_model.state_dict()
     aggregated_params = {}
-    aggregated_params_for_mask = {}
+    aggregated_params_for_mask = {} # This is the final aggregated params for global model.
     aggregated_masks = {}
     # set server parameters to 0 in preparation for aggregation,
     for name, param in global_params.items():
@@ -383,26 +416,28 @@ for server_round in tqdm(range(args.rounds)):
             continue
         aggregated_params[name] = torch.zeros_like(param, dtype=torch.float, device='cpu')
         aggregated_params_for_mask[name] = torch.zeros_like(param, dtype=torch.float, device='cpu')
-        if needs_mask(name):
+        if needs_mask(name): # weight 都需要 mask， bias 不需要。
             aggregated_masks[name] = torch.zeros_like(param, device='cpu')
 
     # for each client k \in S_t in parallel do
     total_sampled = 0
     for client_id in client_indices:
         client = clients[client_id]
+        # print(f'Client-{client_id} starts training! trainset iters:{len(client.train_data)} ')
+
         i = client_ids.index(client_id)
 
         # Local client training.
         t0 = time.process_time()
-        
+
         if args.rate_decay_method == 'cosine':
             readjustment_ratio = args.readjustment_ratio * global_model._decay(server_round, alpha=args.readjustment_ratio, t_end=args.rate_decay_end)
         else:
             readjustment_ratio = args.readjustment_ratio
 
-        readjust = (server_round - 1) % args.rounds_between_readjustments == 0 and readjustment_ratio > 0.
-        if readjust:
-            dprint('readjusting', readjustment_ratio)
+        readjust = (server_round - 1) % args.rounds_between_readjustments == 0 and readjustment_ratio > 0. # bool 值
+        # if readjust:
+        #     print(f'Client-{client_id} is re-adjusting:', readjustment_ratio)
 
         # determine sparsity desired at the end of this round
         # ...via linear interpolation
@@ -415,10 +450,14 @@ for server_round in tqdm(range(args.rounds)):
         train_result = client.train(global_params=global_params, initial_global_params=initial_global_params,
                                     readjustment_ratio=readjustment_ratio,
                                     readjust=readjust, sparsity=round_sparsity)
+
+        print_to_log(f'R-{server_round}: Client-{client_id} S.S:{round_sparsity}; C.S:{client.sparsity()}; ReAdjust:{readjustment_ratio}')
         cl_params = train_result['state']
         download_cost[i] = train_result['dl_cost']
         upload_cost[i] = train_result['ul_cost']
-            
+        cumulative_ul = cumulative_ul + int((upload_cost[i])/8.0/1e6)
+        cumulative_dl = cumulative_dl + int((download_cost[i])/8.0/1e6)
+
         t1 = time.process_time()
         compute_times[i] = t1 - t0
         client.net.clear_gradients() # to save memory
@@ -441,6 +480,7 @@ for server_round in tqdm(range(args.rounds)):
             if args.fp16:
                 cl_weight_params[name] = cl_weight_params[name].to(torch.bfloat16).to(torch.float)
 
+        # This client ended up with current round training.
         # at this point, we have weights and masks (possibly all-ones)
         # for this client. we will proceed by applying the mask and adding
         # the masked received weights to the aggregate, and adding the mask
@@ -448,12 +488,12 @@ for server_round in tqdm(range(args.rounds)):
         for name, cl_param in cl_weight_params.items():
             if name in cl_mask_params:
                 # things like weights have masks
-                cl_mask = cl_mask_params[name]
-                sv_mask = global_params[name + '_mask'].to('cpu', copy=True)
+                cl_mask = cl_mask_params[name] # cl => client
+                sv_mask = global_params[name + '_mask'].to('cpu', copy=True) # sv => server
 
                 # calculate Hamming distance of masks for debugging
-                if readjust:
-                    dprint(f'{client.id} {name} d_h=', torch.sum(cl_mask ^ sv_mask).item())
+                # if readjust:
+                #     print(f'{client.id} {name} d_h=', torch.sum(cl_mask ^ sv_mask).item())
 
                 aggregated_params[name].add_(client.train_size() * cl_param * cl_mask)
                 aggregated_params_for_mask[name].add_(client.train_size() * cl_param * cl_mask)
@@ -461,18 +501,20 @@ for server_round in tqdm(range(args.rounds)):
                 if args.remember_old:
                     sv_mask[cl_mask] = 0
                     sv_param = global_params[name].to('cpu', copy=True)
-
-                    aggregated_params_for_mask[name].add_(client.train_size() * sv_param * sv_mask)
+                    # remember_old 为 True 的时候，aggregated_params_for_mask 才会与 aggregated_params 在 weight 上的值不同。
+                    # 加上 server 的 weight 值，但是最后 global_model inference 时并没有用到，只是用于重新计算 server mask
+                    aggregated_params_for_mask[name].add_(client.train_size() * sv_param) #* sv_mask)
                     aggregated_masks[name].add_(client.train_size() * sv_mask)
             else:
                 # things like biases don't have masks
+                # aggregated_params_for_mask 一直都没有 bias 的值。
                 aggregated_params[name].add_(client.train_size() * cl_param)
 
-    # at this point, we have the sum of client parameters
+    # at this point, ALL selected clients ended up with current round training.
+    # we have the sum of client parameters
     # in aggregated_params, and the sum of masks in aggregated_masks. We
     # can take the average now by simply dividing...
     for name, param in aggregated_params.items():
-
         # if this parameter has no associated mask, simply take the average.
         if name not in aggregated_masks:
             aggregated_params[name] /= sum(clients[i].train_size() for i in client_indices)
@@ -480,13 +522,11 @@ for server_round in tqdm(range(args.rounds)):
 
         # drop parameters with not enough votes
         aggregated_masks[name] = F.threshold_(aggregated_masks[name], args.min_votes, 0)
-
         # otherwise, we are taking the weighted average w.r.t. the number of 
         # samples present on each of the clients.
         aggregated_params[name] /= aggregated_masks[name]
         aggregated_params_for_mask[name] /= aggregated_masks[name]
         aggregated_masks[name] /= aggregated_masks[name]
-
         # it's possible that some weights were pruned by all clients. In this
         # case, we will have divided by zero. Those values have already been
         # pruned out, so the values here are only placeholders.
@@ -505,7 +545,7 @@ for server_round in tqdm(range(args.rounds)):
     # reset global params to aggregated values
     global_model.load_state_dict(aggregated_params_for_mask)
 
-    if global_model.sparsity() < round_sparsity:
+    if global_model.sparsity() < round_sparsity: #
         # we now have denser networks than we started with at the beginning of
         # the round. reprune on the server to get back to the desired sparsity.
         # we use layer-wise magnitude pruning as before.
@@ -517,43 +557,48 @@ for server_round in tqdm(range(args.rounds)):
         new_mask = global_params[name + '_mask']
         aggregated_params[name + '_mask'] = new_mask
         aggregated_params[name][~new_mask] = 0
+
     global_model.load_state_dict(aggregated_params)
 
     # evaluate performance
     torch.cuda.empty_cache()
     if server_round % args.eval_every == 0 and args.eval:
-        accuracies, sparsities = evaluate_global(clients, global_model, progress=True,
+        accuracies, sparsities = evaluate_global_clients(clients, global_model, loaders, progress=False,
                                                  n_batches=args.test_batches)
 
+    global_acc = evaluate_global_model(global_model, loaders)
     for client_id in clients:
         i = client_ids.index(client_id)
-        if server_round % args.eval_every == 0 and args.eval:
-            print_csv_line(pid=args.pid,
-                           dataset=args.dataset,
-                           clients=args.clients,
-                           total_clients=len(clients),
+        if server_round == 0:
+            clients[client_id].initial_global_params = initial_global_params
+        if (server_round % args.eval_every == 0) and args.eval:
+            print_csv_line(
+                # pid=args.pid,
                            round=server_round,
-                           batch_size=args.batch_size,
-                           epochs=args.epochs,
                            target_sparsity=round_sparsity,
-                           pruning_rate=args.readjustment_ratio,
-                           initial_pruning_threshold='',
-                           final_pruning_threshold='',
-                           pruning_threshold_growth_method='',
-                           pruning_method='',
-                           lth=False,
+                        #    initial_pruning_threshold='',
+                        #    final_pruning_threshold='',
+                        #    pruning_threshold_growth_method='',
+                        #    pruning_method='',
+                        #    lth=False,
                            client_id=client_id,
-                           accuracy=accuracies[client_id],
                            sparsity=sparsities[client_id],
                            compute_time=compute_times[i],
                            download_cost=download_cost[i],
-                           upload_cost=upload_cost[i])
+                           upload_cost=upload_cost[i],
+                           accuracy=accuracies[client_id],
+                           global_acc=global_acc.item())
+
+    global_acc = evaluate_global_model(global_model, loaders)
+    if server_round == args.rounds-1:
+        print_to_log(f'FINAL ROUND! {server_round}')
+        print_to_log('Final Global Acc: ', global_acc)
+    else:
+        print_to_log(f'Global Acc @{server_round+1}: {global_acc}, CUL:{cumulative_ul} MiB, CDL:{cumulative_dl} MiB')
 
         # if we didn't send initial global params to any clients in the first round, send them now.
         # (in the real world, this could be implemented as the transmission of
         # a random seed, so the time and place for this is not a concern to us)
-        if server_round == 0:
-            clients[client_id].initial_global_params = initial_global_params
 
     if server_round % args.eval_every == 0 and args.eval:
         # clear compute, UL, DL costs
@@ -561,6 +606,8 @@ for server_round in tqdm(range(args.rounds)):
         download_cost[:] = 0
         upload_cost[:] = 0
 
+flog.close()
+fcsv.close()
 #print2('OVERALL SUMMARY')
 #print2()
 #print2(f'{args.total_clients} clients, {args.clients} chosen each round')
