@@ -455,8 +455,8 @@ for server_round in range(args.rounds): # 默认 400
         cl_params = train_result['state']
         download_cost[i] = train_result['dl_cost']
         upload_cost[i] = train_result['ul_cost']
-        cumulative_ul = cumulative_ul + int((upload_cost[i])/8.0/1e6)
-        cumulative_dl = cumulative_dl + int((download_cost[i])/8.0/1e6)
+        cumulative_ul = cumulative_ul + upload_cost[i] # int((upload_cost[i])/8.0/1e6)
+        cumulative_dl = cumulative_dl + download_cost[i] # int((download_cost[i])/8.0/1e6)
 
         t1 = time.process_time()
         compute_times[i] = t1 - t0
@@ -594,7 +594,7 @@ for server_round in range(args.rounds): # 默认 400
         print_to_log(f'FINAL ROUND! {server_round}')
         print_to_log('Final Global Acc: ', global_acc)
     else:
-        print_to_log(f'Global Acc @{server_round+1}: {global_acc}, CUL:{cumulative_ul} MiB, CDL:{cumulative_dl} MiB')
+        print_to_log(f'Global Acc @{server_round+1}: {global_acc}, CUL:{int(cumulative_ul/8.0/1e6)} MiB, CDL:{int(cumulative_dl/8.0/1e6)} MiB')
 
         # if we didn't send initial global params to any clients in the first round, send them now.
         # (in the real world, this could be implemented as the transmission of
