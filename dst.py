@@ -32,8 +32,10 @@ parser.add_argument('--eta', type=float, help='learning rate', default=0.01)
 parser.add_argument('--clients', type=int, help='number of clients per round', default=20)
 parser.add_argument('--rounds', type=int, help='number of global rounds', default=400)
 parser.add_argument('--epochs', type=int, help='number of local epochs', default=10)
-parser.add_argument('--dataset', type=str, choices=('mnist', 'emnist', 'cifar10', 'cifar100'),
+parser.add_argument('--dataset', type=str, choices=('mnist', 'emnist', 'cifar10', 'cifar100','pacs', 'office', 'officehome'),
                     default='mnist', help='Dataset to use')
+parser.add_argument("--source", nargs='+', help='specified when using DG datasets')
+parser.add_argument("--target", nargs='+', help="Target")
 parser.add_argument('--distribution', type=str, choices=('dirichlet', 'lotteryfl', 'iid'), default='dirichlet',
                     help='how should the dataset be distributed?')
 parser.add_argument('--beta', type=float, default=0.1, help='Beta parameter (unbalance rate) for Dirichlet distribution')
@@ -72,8 +74,8 @@ parser.add_argument('-o', '--outfile', default='output', type=str)
 
 
 args = parser.parse_args()
-flog = open(args.outfile+'.log', 'w')
-fcsv = open(args.outfile+'.csv', 'w')
+flog = open(args.outfile+'.log', 'a')
+fcsv = open(args.outfile+'.csv', 'a')
 
 devices = [torch.device(x) for x in args.device]
 args.pid = os.getpid()
@@ -84,6 +86,8 @@ if args.final_sparsity is None:
     args.final_sparsity = args.sparsity
 if args.sparsity <= 0 :
     args.readjustment_ratio = 0
+
+args.use_DG_dataset = args.dataset in ['pacs', 'officehome', 'vlcs']
 
 def print_to_log(*arg, **kwargs):
     print(*arg, **kwargs, file=flog)
@@ -104,10 +108,12 @@ def nan_to_num(x, nan=0, posinf=0, neginf=0):
     return x.clone()
 
 def evaluate_global_model(global_model, loaders):
+    target_loaders = [(dm, loaders[dm]) for dm in args.target] if args.use_DG_dataset else loaders.items()
     global_test_data = []
-    for _, (_, client_loaders) in enumerate(loaders.items()):
+    for _, (_, client_loaders) in enumerate(target_loaders):
         _, _, test_data = client_loaders
         global_test_data += test_data
+
     with torch.no_grad():
         correct = 0.
         total = 0.
@@ -123,6 +129,7 @@ def evaluate_global_model(global_model, loaders):
                 correct += sum(labels == outputs)
                 total += len(labels)
         global_model_acc = correct / total 
+        print(total)
     return global_model_acc
 
 def evaluate_global_clients(clients, global_model, loaders, progress=False, n_batches=0):
@@ -185,7 +192,7 @@ loaders = get_dataset(args.dataset, clients=args.total_clients, mode=args.distri
 class Client:
 
     def __init__(self, id, device, train_data, test_data, net=models.MNISTNet,
-                 local_epochs=10, learning_rate=0.01, target_sparsity=0.1):
+                 local_epochs=10, learning_rate=0.01, target_sparsity=0.1, classes=10):
         '''Construct a new client.
 
         Parameters:
@@ -202,13 +209,12 @@ class Client:
 
         Returns: a new client.
         '''
-
         self.id = id
 
         self.train_data, self.test_data = train_data, test_data
 
         self.device = device
-        self.net = net(device=self.device).to(self.device)
+        self.net = net(device=self.device, classes=classes).to(self.device)
         initialize_mask(self.net)
         self.criterion = nn.CrossEntropyLoss()
 
@@ -272,7 +278,7 @@ class Client:
 
             running_loss = 0.
 
-            for inputs, labels in self.train_data:
+            for i, (inputs, labels) in enumerate(self.train_data):
                 inputs = inputs.to(self.device)
                 labels = labels.to(self.device)
                 self.optimizer.zero_grad()
@@ -285,7 +291,8 @@ class Client:
                 self.optimizer.step()
 
                 self.reset_weights() # applies the mask
-
+                if len(self.train_data) % 10 == 0:
+                    print(f"iteration: {i}, loss: {loss.item()}")
                 running_loss += loss.item()
 
             if (self.curr_epoch - args.pruning_begin) % args.pruning_interval == 0 and readjust:
@@ -350,19 +357,28 @@ class Client:
 print('Initializing clients...')
 clients = {}
 client_ids = []
+dataset_classes = {
+    'mnist': 10,
+    'cifar10': 10,
+    'cifar100': 100,
+    'pacs': 7,
+    'officehome': 65,
+    'vlcs': 5,
+}
 
+client_loaders = [(dm, loaders[dm]) for dm in args.source] if args.use_DG_dataset else loaders.items()
 # for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
-for i, (client_id, client_loaders) in enumerate(loaders.items()):
+for i, (client_id, client_loaders) in enumerate(client_loaders):
     cl = Client(client_id, *client_loaders, net=all_models[args.dataset],
                 learning_rate=args.eta, local_epochs=args.epochs,
-                target_sparsity=args.sparsity)
+                target_sparsity=args.sparsity, classes=dataset_classes[args.dataset])
     print(f"Client-{client_id}: {len(cl.train_data)} iters/epoch")
     clients[client_id] = cl
     client_ids.append(client_id)
     torch.cuda.empty_cache()
 
 # initialize global model
-global_model = all_models[args.dataset](device='cpu')
+global_model = all_models[args.dataset](device='cpu', classes=dataset_classes[args.dataset])
 initialize_mask(global_model)
 
 # execute grasp on one client if needed (by default: False)
@@ -374,13 +390,13 @@ if args.grasp:
     pruned_params = {}
     for cname, ch in pruned_net.named_children():
         for bname, buf in ch.named_buffers():
-            if bname == 'weight_mask':
+            if bname.endswith('weight_mask'):
                 pruned_masks[cname] = buf.to(device=torch.device('cpu'), dtype=torch.bool)
         for pname, param in ch.named_parameters():
             pruned_params[(cname, pname)] = param.to(device=torch.device('cpu'))
     for cname, ch in global_model.named_children():
         for bname, buf in ch.named_buffers():
-            if bname == 'weight_mask':
+            if bname.endswith('weight_mask'):
                 buf.copy_(pruned_masks[cname])
         for pname, param in ch.named_parameters():
             param.data.copy_(pruned_params[(cname, pname)])
@@ -497,7 +513,7 @@ for server_round in range(args.rounds): # 默认 400
 
                 aggregated_params[name].add_(client.train_size() * cl_param * cl_mask)
                 aggregated_params_for_mask[name].add_(client.train_size() * cl_param * cl_mask)
-                aggregated_masks[name].add_(client.train_size() * cl_mask)
+                aggregated_masks[name].add_(client.train_size() * cl_mask) # 这里就体现出了 votes，train_size 越大，对应 mask votes越大。
                 if args.remember_old:
                     sv_mask[cl_mask] = 0
                     sv_param = global_params[name].to('cpu', copy=True)

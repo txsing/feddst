@@ -8,9 +8,17 @@ import torch.nn.functional as F
 import torchvision
 import prune as torch_prune
 import warnings
+from torch.utils import model_zoo
+from torchvision.models.resnet import BasicBlock, model_urls, Bottleneck
+from collections import OrderedDict
 
 
 # Utility functions
+def encode_buffer_name(name):
+    return name.replace('.', '@')
+
+def decode_buffer_name(name):
+    return name.replace('@', '.')
 
 def needs_mask(name):
     return name.endswith('weight')
@@ -26,7 +34,8 @@ def initialize_mask(model, dtype=torch.bool):
                         'Parameter has a pruning mask already. '
                         'Reinitialize to an all-one mask.'
                     )
-                layer.register_buffer(name + '_mask', torch.ones_like(param, dtype=dtype))
+                bname = encode_buffer_name(name)+'_mask'
+                layer.register_buffer(bname, torch.ones_like(param, dtype=dtype))
                 continue
                 parent = name[:name.rfind('.')]
 
@@ -94,17 +103,11 @@ class PrunableNet(nn.Module):
         with torch.no_grad():
             layer_names = []
             sparsities = np.empty(len(list(self.named_children()))) # 3层layers => sparsities: [S1, S2, S3] 
+            # sparsities = []
             n_weights = np.zeros_like(sparsities, dtype=int)
 
             for i, (name, layer) in enumerate(self.named_children()):
                 layer_names.append(name)
-                for pname, param in layer.named_parameters():
-                    n_weights[i] += param.numel()
-
-                if sparsity_distribution == 'uniform':
-                    sparsities[i] = sparsity
-                    continue
-                
                 kernel_size = None
                 if isinstance(layer, nn.modules.conv._ConvNd):
                     neur_out = layer.out_channels
@@ -114,7 +117,26 @@ class PrunableNet(nn.Module):
                     neur_out = layer.out_features
                     neur_in = layer.in_features
                 else:
-                    raise ValueError('Unsupported layer type ' + type(layer))
+                    continue
+
+                for pname, param in layer.named_parameters():
+                    n_weights[i] += param.numel()
+
+                if sparsity_distribution == 'uniform':
+                    sparsities[i] = sparsity
+                    # sparsities.append(sparsity)
+                    continue
+
+                # kernel_size = None
+                # if isinstance(layer, nn.modules.conv._ConvNd):
+                #     neur_out = layer.out_channels
+                #     neur_in = layer.in_channels
+                #     kernel_size = layer.kernel_size
+                # elif isinstance(layer, nn.Linear):
+                #     neur_out = layer.out_features
+                #     neur_in = layer.in_features
+                # else:
+                #     raise ValueError('Unsupported layer type ' + str(type(layer)))
 
                 if sparsity_distribution == 'er':
                     sparsities[i] = 1 - (neur_in + neur_out) / (neur_in * neur_out)
@@ -131,8 +153,8 @@ class PrunableNet(nn.Module):
             # sparsity, and s[i] = C n[i]
             sparsities *= sparsity * np.sum(n_weights) / np.sum(sparsities * n_weights)
             n_weights = np.floor((1-sparsities) * n_weights)
-
-            return {layer_names[i]: n_weights[i] for i in range(len(layer_names))}
+            ret =  {layer_names[i]: n_weights[i] for i in range(len(layer_names))}
+            return ret
 
 
     def layer_prune(self, sparsity=0.1, sparsity_distribution='erk'):
@@ -170,7 +192,7 @@ class PrunableNet(nn.Module):
                     # Write and apply mask
                     param.data.view(param.data.numel())[prune_indices] = 0
                     for bname, buf in layer.named_buffers():
-                        if bname == pname + '_mask':
+                        if bname == decode_buffer_name(pname) + '_mask':
                             buf.view(buf.numel())[prune_indices] = 0
             #print('pruned sparsity', self.sparsity())
 
@@ -211,7 +233,7 @@ class PrunableNet(nn.Module):
                     # Write and apply mask
                     param.data.view(param.data.numel())[grow_indices] = 0
                     for bname, buf in layer.named_buffers():
-                        if bname == pname + '_mask':
+                        if bname == decode_buffer_name(pname) + '_mask':
                             buf.view(buf.numel())[grow_indices] = 1
             #print('grown sparsity', self.sparsity())
 
@@ -538,7 +560,7 @@ class CIFAR100Net(PrunableNet):
         x = F.relu(self.fc1(x))
         x = F.softmax(self.fc2(x), dim=1)
         return x
-    
+
 
 class EMNISTNet(PrunableNet):
 
@@ -589,10 +611,137 @@ class Conv2(PrunableNet):
         return x
 
 
+class ResNet(PrunableNet):
+    def __init__(self, block, layers, classes=7, num_channels=3, **kwargs):
+        self.inplanes = 64
+        super(ResNet, self).__init__()
+        self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=7, stride=2, padding=3,
+                               bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2) # 
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+        self.avgpool = nn.AvgPool2d(7, stride=1)
+        self.class_classifier = nn.Linear(512 * block.expansion, classes)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    # stride 参数决定了 该 Residual Layer 的第一个 block 的 stride，进而决定了这个layer 会不会缩减图片尺寸
+    # res18 里只有第一个 Layer 不需要缩减，其他 Layer 都需要减半尺寸
+    def _make_layer(self, block, planes, blocks, stride=1):
+        downsample = None
+        # stride ！=1 意味着，第一个 block 需要缩减 size（第一个 block 的 X 和 Y 都需要进行 size 调整）， downsample 调整 X
+        # block.expansion 是针对 Bottleneck Block，该类型 Block 会 4 倍地 expand input dimensions 
+        # 所以其实 downsample 这里做了两件事 1. 调整 size  2. 调整 dimensions
+        # 每一个 Layer 都有且只有一个 downsample
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion),
+            )
+
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample)) # 第一个 Block 用了 stride 参数，改变 size 且使用 downsample
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes)) # 后面就默认为1，不改变 size
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x, **kwargs):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        x = self.maxpool(x)
+        # layers_output_dict['max_pool']=x
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        # layers_output_dict['avg_pool']=x
+        x = x.view(x.size(0), -1)
+        out = self.class_classifier(x)
+        # layers_output_dict['fc']=out
+        return out
+def resnet18(pretrained=True, **kwargs):
+    """Constructs a ResNet-18 model.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']), strict=False)
+    return model
+
+
+class VggNet(PrunableNet):
+    def __init__(self, *args, classes=7, **kwargs):
+        super(VggNet, self).__init__(*args,  **kwargs)
+        model = torchvision.models.vgg16(num_classes=classes)
+        self.feature_layer_names = ['conv1_1', 'relu1_1',
+             'conv1_2', 'relu1_2',
+             'pool1',
+             'conv2_1', 'relu2_1',
+             'conv2_2', 'relu2_2',
+             'pool2',
+             'conv3_1', 'relu3_1',
+             'conv3_2', 'relu3_2',
+             'conv3_3', 'relu3_3',
+             'pool3',
+             'conv4_1', 'relu4_1',
+             'conv4_2', 'relu4_2',
+             'conv4_3', 'relu4_3',
+             'pool4',
+             'conv5_1', 'relu5_1',
+             'conv5_2', 'relu5_2',
+             'conv5_3', 'relu5_3',
+             'pool5']
+        for idx in range(len(self.feature_layer_names)):
+            setattr(self, self.feature_layer_names[idx], model.features[idx])
+
+
+        # layers = collections.OrderedDict(zip(self.layer_names, model.features))
+        # self.features = torch.nn.Sequential(layers)
+        self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
+        self.classifier_layer_names = [
+            'fc6', 'relu6',
+            'drop6',
+            'fc7', 'relu7',
+            'drop7',
+            'fc8a']
+        for idx in range(len(self.classifier_layer_names)):
+            setattr(self, self.classifier_layer_names[idx], model.classifier[idx])
+        # self.classifier = torch.nn.Sequential(OrderedDict(zip(self.classifier_layer_names, model.classifier)))
+        self.init_param_sizes()
+
+    def forward(self, x, **kwargs):
+        for layername in self.feature_layer_names:
+            x = getattr(self, layername)(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        for layername in self.classifier_layer_names:
+            x = getattr(self, layername)(x)
+        # x = self.classifier(x)
+        return  x
+
 all_models = {
         'mnist': MNISTNet,
         # 'mnist': Conv2,
         'emnist': Conv2,
         'cifar10': CIFAR10Net,
-        'cifar100': CIFAR100Net
+        'cifar100': CIFAR100Net,
+        'pacs': VggNet,
+        'office': resnet18,
+        'office-home': resnet18,
 }

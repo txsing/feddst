@@ -4,7 +4,17 @@ import os
 import torch
 import torchvision
 from tqdm import tqdm
+from os.path import join, dirname
+from random import sample
+from FLDataset import FLDataset
+from torchvision import transforms
 
+dataset_domains = {
+    'vlcs': ["CALTECH", "LABELME", "PASCAL", "SUN"],
+    'pacs': ["art_painting", "cartoon", "photo", "sketch"],
+    'officehome': ["Art", "Clipart", "Product", "RealWorld"],
+    'domainnet': ["clipart", "infograph", "painting", "quickdraw", "real", "sketch"]
+}
 
 def distribute_clients_categorical(x, p, clients=400, beta=0.1):
 
@@ -174,7 +184,7 @@ def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=4
                                                    sampler=train_sampler)
         test_loader = torch.utils.data.DataLoader(test, batch_size=batch_size,
                                                   sampler=test_sampler)
-        loaders[i] = (train_loader, test_loader)
+        loaders[i] = (0, train_loader, test_loader)
 
     return loaders
 
@@ -189,6 +199,70 @@ def get_cifar10(*args, **kwargs):
 
 def get_cifar100(*args, **kwargs):
     return get_mnist_or_cifar10('cifar100', *args, **kwargs)
+
+def get_pacs(*args, **kwargs):
+    return get_pacs_officehome_vlcs('pacs')
+
+def get_officehome(*args, **kwargs):
+    return get_pacs_officehome_vlcs('officehome')
+
+def get_vlcs(*args, **kwargs):
+    return get_pacs_officehome_vlcs('vlcs')
+
+def get_path_dataset_info(domain_name, split):
+    postfix_pattern = '_' + split + '.txt'
+    if domain_name in dataset_domains['officehome']:
+            postfix_pattern = '.txt'
+    dataset_path = join(dirname(__file__), 'data/txt_lists', ('%s'+postfix_pattern) % domain_name)
+    sample_paths, labels = get_dataset_paths(dataset_path)
+    return sample_paths, labels
+
+def get_dataset_paths(txt_labels):
+    with open(txt_labels, 'r') as f:
+        images_list = f.readlines()
+    file_names = []
+    labels = []
+    for row in images_list:
+        row = row.split(' ')
+        file_names.append(row[0])
+        labels.append(int(row[1]))
+    return file_names, labels
+
+def get_random_subset(names, labels, percent):
+    needVal = True
+    if not percent > 0.0:
+        needVal = False
+        percent = 0.1
+    samples = len(names)
+    amount = int(samples * percent)
+    random_index = sample(range(samples), amount)
+    name_val = [names[k] for k in random_index]
+    name_train = [v for k, v in enumerate(names) if k not in random_index]
+
+    labels_val = [labels[k] for k in random_index]
+    labels_train = [v for k, v in enumerate(labels) if k not in random_index]
+
+    if needVal:
+        return name_train, name_val, labels_train, labels_val
+    else:
+        return names, name_val, labels, labels_val
+
+def get_pacs_officehome_vlcs(dataset='pacs', batch_size=32, **kwargs):
+    loaders = {}
+    img_tr = [transforms.Resize((222, 222)), transforms.ToTensor(),
+                  transforms.Normalize([0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]
+    img_transformer = transforms.Compose(img_tr)
+    for dname in dataset_domains[dataset]: 
+        paths_train, labels_train = get_path_dataset_info(dname, 'train')
+        paths_test, labels_test = get_path_dataset_info(dname, 'test')
+        # paths_train, paths_val, labels_train, labels_val = get_random_subset(paths, labels, 0.1)
+        trainset = FLDataset(labels_train, sample_paths = paths_train,transformer=img_transformer)
+        testset = FLDataset(labels_test, sample_paths=paths_test, transformer=img_transformer)
+
+        train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=4)
+        test_loader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=True, num_workers=4)
+        loaders[dname] = (0, train_loader, test_loader) # 0 here is the gpu device id.
+    return loaders
 
 
 def get_emnist(path='../leaf/data/femnist/data', min_samples=0, batch_size=32,
@@ -255,7 +329,10 @@ def get_dataset(dataset, devices=None, **kwargs):
         'mnist': get_mnist,
         'emnist': get_emnist,
         'cifar10': get_cifar10,
-        'cifar100': get_cifar100
+        'cifar100': get_cifar100,
+        'pacs': get_pacs,
+        'officehome': get_officehome,
+        'vlcs': get_vlcs,
     }
 
     if dataset not in DATASET_LOADERS:
@@ -263,9 +340,10 @@ def get_dataset(dataset, devices=None, **kwargs):
 
     loaders = DATASET_LOADERS[dataset](**kwargs)
 
-    if devices is None:
+    if devices is None or len(devices) == 1: # no caching
         return loaders
 
+    # Cache the data on the given devices. (此处是为了多显卡训练，将数据分配到不同的显卡上)
     new_loaders = {}
     for i, (uid, (train_loader, test_loader)) in enumerate(loaders.items()):
         device = devices[i % len(devices)]
