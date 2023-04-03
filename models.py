@@ -125,7 +125,7 @@ class PrunableNet(nn.Module):
                 if sparsity_distribution == 'uniform':
                     sparsities[i] = sparsity
                     # sparsities.append(sparsity)
-                    continue
+                    continuegit
 
                 # kernel_size = None
                 # if isinstance(layer, nn.modules.conv._ConvNd):
@@ -157,7 +157,7 @@ class PrunableNet(nn.Module):
             return ret
 
 
-    def layer_prune(self, sparsity=0.1, sparsity_distribution='erk'):
+    def layer_prune(self, sparsity=0.1, sparsity_distribution='erk', global_directions={}):
         '''
         Prune the network to the desired sparsity, following the specified
         sparsity distribution. The weight magnitude is used for pruning.
@@ -186,10 +186,32 @@ class PrunableNet(nn.Module):
                         continue
 
                     # Determine smallest indices
-                    _, prune_indices = torch.topk(torch.abs(param.data.flatten()),
-                                                  n_prune, largest=False)
+                    same_directions = []
+                    paradata_tmp = torch.abs(param.data.flatten())
+                    if param.grad is not None and len(global_directions) > 0:
+                        grad_direction = torch.sign(param.grad.flatten())
+                        x = global_directions[name+'.'+pname].flatten()
+                        same_directions = (grad_direction == x)
+                    if len(same_directions) > 0:
+                        diff_directions_count = torch.sum(~same_directions)
+                        # print(diff_directions_count, n_prune)
+                        # input()
+                        n_prune = max(diff_directions_count, n_prune)
+                        paradata_tmp[same_directions] = 0.0
+                    _, prune_indices = torch.topk(paradata_tmp, n_prune, largest=False)
 
+                    # _, prune_indices = torch.topk(torch.abs(param.data.flatten()),
+                    #                               n_prune, largest=False)
+                    # new_indices = []
+                    # if len(same_directions) == 0:
+                    #     new_indices = prune_indices
+                    # else:
+                    #     for idx in prune_indices:
+                    #         if not same_directions[idx]:
+                    #             new_indices.append(idx)
+                    #     new_indices = torch.tensor(new_indices)
                     # Write and apply mask
+
                     param.data.view(param.data.numel())[prune_indices] = 0
                     for bname, buf in layer.named_buffers():
                         if bname == decode_buffer_name(pname) + '_mask':
@@ -197,7 +219,7 @@ class PrunableNet(nn.Module):
             #print('pruned sparsity', self.sparsity())
 
 
-    def layer_grow(self, sparsity=0.1, sparsity_distribution='erk'):
+    def layer_grow(self, sparsity=0.1, sparsity_distribution='erk',  global_directions={}):
         '''
         Grow the network to the desired sparsity, following the specified
         sparsity distribution.
@@ -225,10 +247,22 @@ class PrunableNet(nn.Module):
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
                         continue
-
+                    
+                    same_directions = []
+                    paragrad_tmp = torch.abs(param.grad.flatten())
+                    
+                    if param.grad is not None and len(global_directions) > 0:
+                        grad_direction = torch.sign(param.grad.flatten())
+                        x = global_directions[name+'.'+pname].flatten()
+                        same_directions = (grad_direction == x)
+                    if len(same_directions) > 0:
+                        same_directions_count = torch.sum(same_directions)
+                        print(same_directions_count, n_grow)
+                        input()
+                        n_grow = min(same_directions_count, n_grow)
+                        paragrad_tmp[~same_directions] = 0.0
                     # Determine largest gradient indices
-                    _, grow_indices = torch.topk(torch.abs(param.grad.flatten()),
-                                                 n_grow, largest=True)
+                    _, grow_indices = torch.topk(paragrad_tmp, n_grow, largest=True)
 
                     # Write and apply mask
                     param.data.view(param.data.numel())[grow_indices] = 0
@@ -394,7 +428,7 @@ class PrunableNet(nn.Module):
                     new_state[mask_name].copy_(mask_to_copy) # copy mask from mask_source into this model's mask
 
                     # what do we do with shadowed weights?
-                    if not keep_local_masked_weights:
+                    if not keep_local_masked_weights: # by default, keep_local_masked_weights is False, this if-clause will enter-in
                         new_state[name][~mask_to_apply] = 0
 
                     if mask_name not in local_state or not torch.equal(local_state[mask_name], mask_to_copy):
@@ -493,7 +527,7 @@ class PrunableNet(nn.Module):
 
 class MNISTNet(PrunableNet):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, classes=10, *args, **kwargs):
         super(MNISTNet, self).__init__(*args, **kwargs)
 
         self.conv1 = nn.Conv2d(1, 10, 5) # "Conv 1-10"

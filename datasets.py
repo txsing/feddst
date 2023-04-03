@@ -311,7 +311,7 @@ def get_emnist(path='../leaf/data/femnist/data', min_samples=0, batch_size=32,
     return loaders
 
 
-def get_dataset(dataset, devices=None, **kwargs):
+def get_dataset(dataset, devices=['0'], **kwargs):
     '''Fetch the requested dataset, caching if needed
 
     Parameters:
@@ -340,17 +340,18 @@ def get_dataset(dataset, devices=None, **kwargs):
 
     loaders = DATASET_LOADERS[dataset](**kwargs)
 
-    if devices is None or len(devices) == 1: # no caching
-        return loaders
-
     # Cache the data on the given devices. (此处是为了多显卡训练，将数据分配到不同的显卡上)
     new_loaders = {}
-    for i, (uid, (train_loader, test_loader)) in enumerate(loaders.items()):
+    for i, (uid, loader) in enumerate(loaders.items()):
         device = devices[i % len(devices)]
-        train_data = [(x.to(device), y.to(device)) for x, y in train_loader]
-        test_data = [(x.to(device), y.to(device)) for x, y in test_loader]
-
-        new_loaders[uid] = (device, train_data, test_data)
+        if len(loader) == 3:
+            (_, train_loader, test_loader) = loader
+            new_loaders[uid] = (device, train_loader, test_loader)
+        else:
+            (train_loader, test_loader) = loader
+            train_data = [(x.to(device), y.to(device)) for x, y in train_loader]
+            test_data = [(x.to(device), y.to(device)) for x, y in test_loader]
+            new_loaders[uid] = (device, train_data, test_data)
 
     return new_loaders
 
