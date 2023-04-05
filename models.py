@@ -189,7 +189,7 @@ class PrunableNet(nn.Module):
                     paradata_tmp = torch.abs(param.data.flatten())
                     if param.grad is not None and len(global_directions) > 0:
                         grad_direction = torch.sign(param.grad.flatten())
-                        x = global_directions[name+'.'+pname].flatten()
+                        x = global_directions[name+'.'+pname].flatten().to(self.device)
                         same_directions = (grad_direction == x)
                     if len(same_directions) > 0:
                         diff_directions_count = torch.sum(~same_directions)
@@ -239,7 +239,7 @@ class PrunableNet(nn.Module):
                     
                     if param.grad is not None and len(global_directions) > 0:
                         grad_direction = torch.sign(param.grad.flatten())
-                        x = global_directions[name+'.'+pname].flatten()
+                        x = global_directions[name+'.'+pname].flatten().to(self.device)
                         same_directions = (grad_direction == x)
                     if len(same_directions) > 0:
                         same_directions_count = torch.sum(same_directions)
