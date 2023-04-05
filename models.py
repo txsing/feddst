@@ -179,7 +179,6 @@ class PrunableNet(nn.Module):
                 n_prune = int(n_total - weights_by_layer[name])
                 if n_prune >= n_total or n_prune < 0:
                     continue
-                #print('prune out', n_prune)
 
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
@@ -194,23 +193,10 @@ class PrunableNet(nn.Module):
                         same_directions = (grad_direction == x)
                     if len(same_directions) > 0:
                         diff_directions_count = torch.sum(~same_directions)
-                        # print(diff_directions_count, n_prune)
-                        # input()
                         n_prune = max(diff_directions_count, n_prune)
-                        paradata_tmp[same_directions] = 0.0
+                        paradata_tmp[same_directions] = 999999
                     _, prune_indices = torch.topk(paradata_tmp, n_prune, largest=False)
 
-                    # _, prune_indices = torch.topk(torch.abs(param.data.flatten()),
-                    #                               n_prune, largest=False)
-                    # new_indices = []
-                    # if len(same_directions) == 0:
-                    #     new_indices = prune_indices
-                    # else:
-                    #     for idx in prune_indices:
-                    #         if not same_directions[idx]:
-                    #             new_indices.append(idx)
-                    #     new_indices = torch.tensor(new_indices)
-                    # Write and apply mask
 
                     param.data.view(param.data.numel())[prune_indices] = 0
                     for bname, buf in layer.named_buffers():
@@ -257,10 +243,8 @@ class PrunableNet(nn.Module):
                         same_directions = (grad_direction == x)
                     if len(same_directions) > 0:
                         same_directions_count = torch.sum(same_directions)
-                        print(same_directions_count, n_grow)
-                        input()
                         n_grow = min(same_directions_count, n_grow)
-                        paragrad_tmp[~same_directions] = 0.0
+                        paragrad_tmp[~same_directions] = -1.0
                     # Determine largest gradient indices
                     _, grow_indices = torch.topk(paragrad_tmp, n_grow, largest=True)
 
