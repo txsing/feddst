@@ -125,7 +125,7 @@ class PrunableNet(nn.Module):
                 if sparsity_distribution == 'uniform':
                     sparsities[i] = sparsity
                     # sparsities.append(sparsity)
-                    continuegit
+                    continue
 
                 # kernel_size = None
                 # if isinstance(layer, nn.modules.conv._ConvNd):
@@ -157,7 +157,7 @@ class PrunableNet(nn.Module):
             return ret
 
 
-    def layer_prune(self, sparsity=0.1, sparsity_distribution='erk', global_directions={}):
+    def layer_prune(self, sparsity=0.1, sparsity_distribution='erk', dire_ratio = 0.1, global_directions={}):
         '''
         Prune the network to the desired sparsity, following the specified
         sparsity distribution. The weight magnitude is used for pruning.
@@ -187,30 +187,33 @@ class PrunableNet(nn.Module):
 
                     # Determine smallest indices
                     same_directions = []
-                    paradata_tmp = torch.abs(param.data.flatten())
                     if param.grad is not None and len(global_directions) > 0:
                         grad_direction = torch.sign(param.grad.flatten())
-                        x = global_directions[name+'.'+pname].flatten()
+                        x = global_directions[name+'.'+pname].flatten().to(self.device)
                         same_directions = (grad_direction == x)
+
+                    n_prune_weight, n_prune_dir = n_prune, 0
+                    prune_indices_dir = None
                     if len(same_directions) > 0:
                         diff_directions_count = torch.sum(~same_directions)
-                        # print(diff_directions_count, n_prune)
-                        # input()
-                        n_prune = max(diff_directions_count, n_prune)
-                        paradata_tmp[same_directions] = 0.0
-                    _, prune_indices = torch.topk(paradata_tmp, n_prune, largest=False)
+                        n_prune_dir = int(dire_ratio * n_prune)
+                        
+                        n_prune_dir = min(n_prune_dir, diff_directions_count)
+                        n_prune_weight = n_prune - n_prune_dir
+                        paradata_tmp = torch.abs(param.data.flatten())
+                        paradata_tmp[same_directions] = 999999
+                        _, prune_indices_dir = torch.topk(paradata_tmp, n_prune_dir, largest=False)
 
-                    # _, prune_indices = torch.topk(torch.abs(param.data.flatten()),
-                    #                               n_prune, largest=False)
-                    # new_indices = []
-                    # if len(same_directions) == 0:
-                    #     new_indices = prune_indices
-                    # else:
-                    #     for idx in prune_indices:
-                    #         if not same_directions[idx]:
-                    #             new_indices.append(idx)
-                    #     new_indices = torch.tensor(new_indices)
-                    # Write and apply mask
+                    prune_indices_weight = None
+                    if prune_indices_dir is not None:
+                        paradata_tmp = torch.abs(param.data.flatten())
+                        paradata_tmp[prune_indices_dir] == 999999
+                        _, prune_indices_weight = torch.topk(paradata_tmp, n_prune_weight, largest=False)
+
+                    if prune_indices_weight is not None:
+                        prune_indices = torch.cat((prune_indices_dir, prune_indices_weight))
+                    else:
+                        _, prune_indices = torch.topk(torch.abs(param.data.flatten()), n_prune, largest=False)
 
                     param.data.view(param.data.numel())[prune_indices] = 0
                     for bname, buf in layer.named_buffers():
@@ -219,7 +222,7 @@ class PrunableNet(nn.Module):
             #print('pruned sparsity', self.sparsity())
 
 
-    def layer_grow(self, sparsity=0.1, sparsity_distribution='erk',  global_directions={}):
+    def layer_grow(self, sparsity=0.1, sparsity_distribution='erk', dire_ratio = 0.1, global_directions={}):
         '''
         Grow the network to the desired sparsity, following the specified
         sparsity distribution.
@@ -247,22 +250,34 @@ class PrunableNet(nn.Module):
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
                         continue
-                    
+
+                    # Determine smallest indices
                     same_directions = []
-                    paragrad_tmp = torch.abs(param.grad.flatten())
-                    
                     if param.grad is not None and len(global_directions) > 0:
                         grad_direction = torch.sign(param.grad.flatten())
-                        x = global_directions[name+'.'+pname].flatten()
+                        x = global_directions[name+'.'+pname].flatten().to(self.device)
                         same_directions = (grad_direction == x)
+
+                    n_grow_grad, n_grow_dir, grow_indices_dir = n_grow, 0, None
                     if len(same_directions) > 0:
                         same_directions_count = torch.sum(same_directions)
-                        print(same_directions_count, n_grow)
-                        input()
-                        n_grow = min(same_directions_count, n_grow)
-                        paragrad_tmp[~same_directions] = 0.0
-                    # Determine largest gradient indices
-                    _, grow_indices = torch.topk(paragrad_tmp, n_grow, largest=True)
+                        n_grow_dir = min(int(dire_ratio * n_grow), same_directions_count)
+                        n_grow_grad = n_grow - n_grow_dir
+
+                        para_grad_tmp = torch.abs(param.grad.flatten())
+                        para_grad_tmp[~same_directions] = -1.0
+                        _, grow_indices_dir = torch.topk(para_grad_tmp, n_grow_dir, largest=True)
+
+                    grow_indices_grad = None
+                    if grow_indices_dir is not None:
+                        para_grad_tmp = torch.abs(param.grad.flatten())
+                        para_grad_tmp[grow_indices_dir] == -1.0
+                        _, grow_indices_grad = torch.topk(para_grad_tmp, n_grow_grad, largest=True)
+
+                    if grow_indices_grad is not None:
+                        grow_indices = torch.cat((grow_indices_dir, grow_indices_grad))
+                    else:
+                        _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)
 
                     # Write and apply mask
                     param.data.view(param.data.numel())[grow_indices] = 0

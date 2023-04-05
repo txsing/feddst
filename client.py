@@ -119,8 +119,10 @@ class Client:
                 outputs = self.net(inputs)
                 self.criterion(outputs, labels).backward()
 
-                self.net.layer_prune(sparsity=prune_sparsity, sparsity_distribution=self.global_args.sparsity_distribution, global_directions=global_params_direction)
-                self.net.layer_grow(sparsity=sparsity, sparsity_distribution=self.global_args.sparsity_distribution, global_directions=global_params_direction)
+                self.net.layer_prune(sparsity=prune_sparsity, sparsity_distribution=self.global_args.sparsity_distribution, 
+                                     dire_ratio = self.global_args.direction_ratio, global_directions=global_params_direction)
+                self.net.layer_grow(sparsity=sparsity, sparsity_distribution=self.global_args.sparsity_distribution,
+                                    dire_ratio = self.global_args.direction_ratio, global_directions=global_params_direction)
                 ul_cost += (1-self.net.sparsity()) * self.net.mask_size # need to transmit mask, unit: bit
             self.curr_epoch += 1
 
