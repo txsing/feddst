@@ -186,6 +186,14 @@ class PrunableNet(nn.Module):
                         continue
 
                     # Determine smallest indices
+                    if dire_ratio <= 0.0:
+                        _, prune_indices = torch.topk(torch.abs(param.data.flatten()), n_prune, largest=False)
+                        param.data.view(param.data.numel())[prune_indices] = 0
+                        for bname, buf in layer.named_buffers():
+                            if bname == decode_buffer_name(pname) + '_mask':
+                                buf.view(buf.numel())[prune_indices] = 0
+                        continue
+
                     same_directions = []
                     if param.grad is not None and len(global_directions) > 0:
                         grad_direction = torch.sign(param.grad.flatten())
@@ -252,6 +260,14 @@ class PrunableNet(nn.Module):
                         continue
 
                     # Determine smallest indices
+                    if dire_ratio <= 0.0:
+                        _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)
+                        param.data.view(param.data.numel())[grow_indices] = 0
+                        for bname, buf in layer.named_buffers():
+                            if bname == decode_buffer_name(pname) + '_mask':
+                                buf.view(buf.numel())[grow_indices] = 1
+                        continue
+
                     same_directions = []
                     if param.grad is not None and len(global_directions) > 0:
                         grad_direction = torch.sign(param.grad.flatten())
@@ -565,7 +581,7 @@ class MNISTNet(PrunableNet):
 
 class CIFAR10Net(PrunableNet):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, classes=10, *args, **kwargs):
         super(CIFAR10Net, self).__init__(*args, **kwargs)
 
         self.conv1 = nn.Conv2d(3, 6, 5)
@@ -590,7 +606,7 @@ class CIFAR10Net(PrunableNet):
 
 class CIFAR100Net(PrunableNet):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, classes=100, *args, **kwargs):
         super(CIFAR100Net, self).__init__(*args, **kwargs)
 
         self.conv1 = nn.Conv2d(3, 6, 5)

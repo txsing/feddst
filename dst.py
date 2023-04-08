@@ -41,7 +41,7 @@ parser.add_argument('--prox', type=float, default=0, help='coefficient to proxim
 
 # Pruning and regrowth options
 parser.add_argument('--sparsity', type=float, default=0.1, help='sparsity from 0 to 1')
-parser.add_argument('-d', '--direction-ratio', type=float, default=0.1, help='from 0 to 1')
+parser.add_argument('-d', '--direction-ratio', type=float, default=0.0, help='from 0 to 1')
 parser.add_argument('--rate-decay-method', default='cosine', choices=('constant', 'cosine'), help='annealing for readjustment ratio')
 parser.add_argument('--rate-decay-end', default=None, type=int, help='round to end annealing')
 parser.add_argument('--readjustment-ratio', type=float, default=0.5, help='readjust this many of the weights each time')
@@ -66,7 +66,6 @@ parser.add_argument('--no-eval', default=True, action='store_false', dest='eval'
 parser.add_argument('--grasp', default=False, action='store_true')
 parser.add_argument('--fp16', default=False, action='store_true', help='upload as fp16')
 parser.add_argument('-o', '--outfile', default='output', type=str)
-# parser.add_argument('-o', '--outfile', default='output', type=argparse.FileType('a', encoding='ascii'))
 
 
 args = parser.parse_args()
@@ -168,6 +167,7 @@ def evaluate_local(clients, global_model, progress=False, n_batches=0):
 
 # Fetch and cache the dataset
 print('Fetching dataset...')
+print_to_log(args)
 cache_devices = devices
 
 '''
