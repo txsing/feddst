@@ -96,6 +96,9 @@ class Client:
             running_loss = 0.
 
             for i, (inputs, labels) in enumerate(self.train_data):
+                if self.global_args.drill and i >= 3:
+                    print('drill training', self.id)
+                    break
                 inputs = inputs.to(self.device)
                 labels = labels.to(self.device)
                 self.optimizer.zero_grad()

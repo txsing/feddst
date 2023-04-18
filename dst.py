@@ -12,7 +12,7 @@ from tqdm import tqdm
 from datasets import get_dataset
 # import models
 from client import Client
-from models import all_models, needs_mask, initialize_mask
+from models import all_models, needs_mask, initialize_mask, encode_mask_name_from_param, decode_param_name_from_mask
 
 rng = np.random.default_rng()
 
@@ -49,6 +49,7 @@ parser.add_argument('--pruning-begin', type=int, default=9, help='first epoch nu
 parser.add_argument('--pruning-interval', type=int, default=10, help='epochs between readjustments')
 parser.add_argument('--rounds-between-readjustments', type=int, default=10, help='rounds between readjustments')
 parser.add_argument('--remember-old', default=False, action='store_true', help="remember client's old weights when aggregating missing ones")
+parser.add_argument('--drill', default=False, action='store_true', help="drill run for quick testing")
 parser.add_argument('--sparsity-distribution', default='erk', choices=('uniform', 'er', 'erk'))
 parser.add_argument('--final-sparsity', type=float, default=None, help='final sparsity to grow to, from 0 to 1. default is the same as --sparsity')
 
@@ -124,7 +125,6 @@ def evaluate_global_model(global_model, loaders):
                 correct += sum(labels == outputs)
                 total += len(labels)
         global_model_acc = correct / total 
-        print(total)
     return global_model_acc
 
 def evaluate_global_clients(clients, global_model, loaders, progress=False, n_batches=0):
@@ -166,6 +166,9 @@ def evaluate_local(clients, global_model, progress=False, n_batches=0):
 
 
 # Fetch and cache the dataset
+if args.drill:
+    print('Enter drill mode ...')
+
 print('Fetching dataset...')
 print_to_log(args)
 cache_devices = devices
@@ -215,7 +218,7 @@ initialize_mask(global_model)
 
 global_model.layer_prune(sparsity=args.sparsity, sparsity_distribution=args.sparsity_distribution)
 
-initial_global_params = deepcopy(global_model.state_dict())
+initial_global_state = deepcopy(global_model.state_dict())
 
 # we need to accumulate compute/DL/UL costs regardless of round number, resetting only
 # when we actually report these numbers
@@ -234,27 +237,26 @@ for server_round in range(args.rounds): # 默认 400
     client_indices = rng.choice(list(clients.keys()), size=args.clients, replace=False)
     print_to_log(f"Selected clients: {client_indices} at round {server_round+1}")
 
-    global_params = global_model.state_dict()
-    aggregated_params = {}
-    aggregated_params_for_mask = {} # This is the final aggregated params for global model.
-    aggregated_masks = {}
+    global_state = global_model.state_dict()
+    aggregated_weight_params = {}
+    aggregated_weight_params_needmsk = {} # This is the final aggregated params for global model.
+    aggregated_mask_params = {}
+    
     # set server parameters to 0 in preparation for aggregation,
-    for name, param in global_params.items():
-        if name.endswith('_mask'):
+    for key, val in global_state.items():
+        if key.endswith('_mask'):
             continue
-        aggregated_params[name] = torch.zeros_like(param, dtype=torch.float, device='cpu')
-        aggregated_params_for_mask[name] = torch.zeros_like(param, dtype=torch.float, device='cpu')
-        if needs_mask(name): # weight 都需要 mask， bias 不需要。
-            aggregated_masks[name] = torch.zeros_like(param, device='cpu')
+        aggregated_weight_params[key] = torch.zeros_like(val, dtype=torch.float, device='cpu')
+        aggregated_weight_params_needmsk[key] = torch.zeros_like(val, dtype=torch.float, device='cpu')
+        if needs_mask(key): # weight 都需要 mask， bias 不需要。
+            aggregated_mask_params[key] = torch.zeros_like(val, device='cpu')
 
     # for each client k \in S_t in parallel do
     total_sampled = 0
     for client_id in client_indices:
         client = clients[client_id]
-        # print(f'Client-{client_id} starts training! trainset iters:{len(client.train_data)} ')
 
         i = client_ids.index(client_id)
-
         # Local client training.
         t0 = time.process_time()
 
@@ -264,9 +266,6 @@ for server_round in range(args.rounds): # 默认 400
             readjustment_ratio = args.readjustment_ratio
 
         readjust = (server_round - 1) % args.rounds_between_readjustments == 0 and readjustment_ratio > 0. # bool 值
-        # if readjust:
-        #     print(f'Client-{client_id} is re-adjusting:', readjustment_ratio)
-
         # determine sparsity desired at the end of this round
         # ...via linear interpolation
         if server_round <= args.rate_decay_end:
@@ -275,12 +274,13 @@ for server_round in range(args.rounds): # 默认 400
             round_sparsity = args.final_sparsity
 
         # actually perform training
-        train_result = client.train(global_params=global_params, initial_global_params=initial_global_params,
+        train_result = client.train(global_params=global_state, initial_global_params=initial_global_state,
                                     readjustment_ratio=readjustment_ratio,
                                     readjust=readjust, sparsity=round_sparsity, global_params_direction=global_params_direction)
 
         print_to_log(f'R-{server_round}: Client-{client_id} S.S:{round_sparsity}; C.S:{client.sparsity()}; ReAdjust:{readjustment_ratio}')
-        cl_params = train_result['state']
+        client_state = train_result['state'] # with mask_name
+
         download_cost[i] = train_result['dl_cost']
         upload_cost[i] = train_result['ul_cost']
         cumulative_ul = cumulative_ul + upload_cost[i] # int((upload_cost[i])/8.0/1e6)
@@ -291,89 +291,91 @@ for server_round in range(args.rounds): # 默认 400
         client.net.clear_gradients() # to save memory
 
         # add this client's params to the aggregate
-
-        cl_weight_params = {}
-        cl_mask_params = {}
+        cl_weight_all_params = {} # key 是所有的 param_name， value 是 weight
+        cl_mask_params_needmsk = {} # key 是需要mask的 param_name （不是 mask_name）， value 是 mask
 
         # first deduce masks for the received weights
-        for name, cl_param in cl_params.items():
-            if name.endswith('_orig'):
-                name = name[:-5]
-            elif name.endswith('_mask'):
-                name = name[:-5]
-                cl_mask_params[name] = cl_param.to(device='cpu', copy=True)
+        for key, cl_val in client_state.items():
+            if key.endswith('_orig'):
+                name = key[:-5]
+            elif key.endswith('_mask'):
+                name = key[:-5]
+                cl_mask_params_needmsk[name] = cl_val.to(device='cpu', copy=True)
                 continue
 
-            cl_weight_params[name] = cl_param.to(device='cpu', copy=True)
+            cl_weight_all_params[key] = cl_val.to(device='cpu', copy=True)
             if args.fp16:
-                cl_weight_params[name] = cl_weight_params[name].to(torch.bfloat16).to(torch.float)
+                cl_weight_all_params[key] = cl_weight_all_params[key].to(torch.bfloat16).to(torch.float)
 
         # This client ended up with current round training.
         # at this point, we have weights and masks (possibly all-ones)
         # for this client. we will proceed by applying the mask and adding
         # the masked received weights to the aggregate, and adding the mask
         # to the aggregate as well.
-        for name, cl_param in cl_weight_params.items():
-            if name in cl_mask_params:
+
+        for name, cl_weight in cl_weight_all_params.items():
+            if name in cl_mask_params_needmsk:
                 # things like weights have masks
-                cl_mask = cl_mask_params[name] # cl => client
-                sv_mask = global_params[name + '_mask'].to('cpu', copy=True) # sv => server
+                cl_mask = cl_mask_params_needmsk[name]
+                sv_mask = global_state[name+'_mask'].to('cpu', copy=True)
 
                 # calculate Hamming distance of masks for debugging
                 # if readjust:
                 #     print(f'{client.id} {name} d_h=', torch.sum(cl_mask ^ sv_mask).item())
+                aggregated_weight_params[name].add_(client.train_size() * cl_weight * cl_mask)
+                aggregated_weight_params_needmsk[name].add_(client.train_size() * cl_weight * cl_mask)
+                aggregated_mask_params[name].add_(client.train_size() * cl_mask) # 这里就体现出了 votes，train_size 越大，对应 mask votes越大。
 
-                aggregated_params[name].add_(client.train_size() * cl_param * cl_mask)
-                aggregated_params_for_mask[name].add_(client.train_size() * cl_param * cl_mask)
-                aggregated_masks[name].add_(client.train_size() * cl_mask) # 这里就体现出了 votes，train_size 越大，对应 mask votes越大。
-                if args.remember_old:
+                if args.remember_old: # By default, this is False.
                     sv_mask[cl_mask] = 0
-                    sv_param = global_params[name].to('cpu', copy=True)
-                    # remember_old 为 True 的时候，aggregated_params_for_mask 才会与 aggregated_params 在 weight 上的值不同。
+                    sv_param = global_state[name].to('cpu', copy=True)
+                    # remember_old 为 True 的时候，aggregated_params_for_mask 才会与 aggregated_weight_params 在 weight 上的值不同。
                     # 加上 server 的 weight 值，但是最后 global_model inference 时并没有用到，只是用于重新计算 server mask
-                    aggregated_params_for_mask[name].add_(client.train_size() * sv_param) #* sv_mask)
-                    aggregated_masks[name].add_(client.train_size() * sv_mask)
+                    aggregated_weight_params_needmsk[name].add_(client.train_size() * sv_param) #* sv_mask)
+                    aggregated_mask_params[name].add_(client.train_size() * sv_mask)
             else:
                 # things like biases don't have masks
-                # aggregated_params_for_mask 一直都没有 bias 的值。
-                aggregated_params[name].add_(client.train_size() * cl_param)
+                aggregated_weight_params[name].add_(client.train_size() * cl_weight)
 
     # at this point, ALL selected clients ended up with current round training.
     # we have the sum of client parameters
     # in aggregated_params, and the sum of masks in aggregated_masks. We
     # can take the average now by simply dividing...
-    for name, param in aggregated_params.items():
+    for name, param in aggregated_weight_params.items():
         # if this parameter has no associated mask, simply take the average.
-        if name not in aggregated_masks:
-            aggregated_params[name] /= sum(clients[i].train_size() for i in client_indices)
+        if name not in aggregated_mask_params:
+            aggregated_weight_params[name] /= sum(clients[i].train_size() for i in client_indices)
             continue
-
+        
+        # 接下里的 name 都是需要 mask 的。
         # drop parameters with not enough votes
-        aggregated_masks[name] = F.threshold_(aggregated_masks[name], args.min_votes, 0)
+        aggregated_mask_params[name] = F.threshold_(aggregated_mask_params[name], args.min_votes, 0)
         # otherwise, we are taking the weighted average w.r.t. the number of 
         # samples present on each of the clients.
-        aggregated_params[name] /= aggregated_masks[name]
-        aggregated_params_for_mask[name] /= aggregated_masks[name]
-        aggregated_masks[name] /= aggregated_masks[name]
+        aggregated_weight_params[name] /= aggregated_weight_params[name]
+        aggregated_weight_params_needmsk[name] /= aggregated_weight_params_needmsk[name]
+        aggregated_mask_params[name] /= aggregated_mask_params[name]
         # it's possible that some weights were pruned by all clients. In this
         # case, we will have divided by zero. Those values have already been
         # pruned out, so the values here are only placeholders.
-        aggregated_params[name] = torch.nan_to_num(aggregated_params[name],
+        aggregated_weight_params[name] = torch.nan_to_num(aggregated_weight_params[name],
                                                    nan=0.0, posinf=0.0, neginf=0.0)
-        aggregated_params_for_mask[name] = torch.nan_to_num(aggregated_params[name],
+        aggregated_weight_params_needmsk[name] = torch.nan_to_num(aggregated_weight_params_needmsk[name],
                                                    nan=0.0, posinf=0.0, neginf=0.0)
-        aggregated_masks[name] = torch.nan_to_num(aggregated_masks[name],
+        aggregated_mask_params[name] = torch.nan_to_num(aggregated_mask_params[name],
                                                   nan=0.0, posinf=0.0, neginf=0.0)
 
     # masks are parameters too!
-    for name, mask in aggregated_masks.items():
-        aggregated_params[name + '_mask'] = mask
-        aggregated_params_for_mask[name + '_mask'] = mask
+    for name, mask in aggregated_mask_params.items():
+        mask_name = name + '_mask'
+        aggregated_weight_params_needmsk[mask_name] = mask
 
-    global_params_pre_rd = deepcopy(global_model.state_dict())
+    global_state_pre_rd = deepcopy(global_model.state_dict())
+ 
     # reset global params to aggregated values
-    global_model.load_state_dict(aggregated_params_for_mask)
-
+    # 这里只 load 了带 mask的参数，没有 load bias什么的。
+    # 因为只是要计算一下新的 mask，所以不需要 load 全部。
+    global_model.load_state_dict(aggregated_weight_params_needmsk)
     if global_model.sparsity() < round_sparsity: #
         # we now have denser networks than we started with at the beginning of
         # the round. reprune on the server to get back to the desired sparsity.
@@ -381,15 +383,15 @@ for server_round in range(args.rounds): # 默认 400
         global_model.layer_prune(sparsity=round_sparsity, sparsity_distribution=args.sparsity_distribution)
 
     # discard old weights and apply new mask
-    global_params = global_model.state_dict()
-    for name, mask in aggregated_masks.items():
-        x = global_params[name] - global_params_pre_rd[name]
-        global_params_direction[name] = torch.sign(x)
-        new_mask = global_params[name + '_mask']
-        aggregated_params[name + '_mask'] = new_mask
-        aggregated_params[name][~new_mask] = 0
-
-    global_model.load_state_dict(aggregated_params)
+    global_state = global_model.state_dict()
+    aggregated_state = aggregated_weight_params # 这里的 aggregated_state 没有 mask，只有 weight
+    for name, mask in aggregated_mask_params.items():
+        delta_weight = global_state[name] - global_state_pre_rd[name]
+        global_params_direction[name] = torch.sign(delta_weight)
+        new_mask = global_state[name+'_mask']
+        aggregated_state[name+'_mask'] = new_mask
+        aggregated_state[name][~new_mask] = 0
+    global_model.load_state_dict(aggregated_state) # 这次所有的 bias 啥的都 load进去了
 
     # evaluate performance
     torch.cuda.empty_cache()
@@ -401,7 +403,7 @@ for server_round in range(args.rounds): # 默认 400
     for client_id in clients:
         i = client_ids.index(client_id)
         if server_round == 0:
-            clients[client_id].initial_global_params = initial_global_params
+            clients[client_id].initial_global_params = initial_global_state
         if (server_round % args.eval_every == 0) and args.eval:
             print_csv_line(
                 # pid=args.pid,
@@ -439,6 +441,7 @@ for server_round in range(args.rounds): # 默认 400
 
 flog.close()
 fcsv.close()
+
 #print2('OVERALL SUMMARY')
 #print2()
 #print2(f'{args.total_clients} clients, {args.clients} chosen each round')

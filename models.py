@@ -20,33 +20,58 @@ def encode_buffer_name(name):
 def decode_buffer_name(name):
     return name.replace('@', '.')
 
+def encode_mask_name_from_param(name, with_layer_prefix=True):
+    mask_name = name + '_mask'
+    # if with_layer_prefix:
+    #     layer_name, para_name = name.split('.', 1)
+    #     mask_name =  layer_name + '.' + encode_buffer_name(para_name) + '_mask'
+    # else:
+    #     mask_name = encode_buffer_name(name) + '_mask'
+    # if mask_name == 'layer1.0.conv1.weight_mask':
+    #    raise Exception('mask_name: ', mask_name)
+    return mask_name
+
+def decode_param_name_from_mask(name, with_layer_prefix=True):
+    return name[:-5]
+    # if with_layer_prefix:
+    #     layer_name, para_name = name.split('.', 1)
+    #     return layer_name + '.' + decode_buffer_name(para_name[:-5])
+    # return decode_buffer_name(name[:-5])
+
 def needs_mask(name):
-    return name.endswith('weight')
+    return (name.endswith('weight')) and ('bn' not in name)
 
 
 def initialize_mask(model, dtype=torch.bool):
-    layers_to_prune = (layer for _, layer in model.named_children())
-    for layer in layers_to_prune:
+    layers_to_prune = ((layername, layer) for layername, layer in model.leaf_modules())
+    for layername, layer in layers_to_prune:
         for name, param in layer.named_parameters():
-            if name.endswith('weight'):
-                if hasattr(layer, name + '_mask'):
-                    warnings.warn(
-                        'Parameter has a pruning mask already. '
-                        'Reinitialize to an all-one mask.'
-                    )
-                bname = encode_buffer_name(name)+'_mask'
-                layer.register_buffer(bname, torch.ones_like(param, dtype=dtype))
+            if not needs_mask(layername + '.' +name):
                 continue
-                parent = name[:name.rfind('.')]
-
-                for mname, module in layer.named_modules():
-                    if mname != parent:
-                        continue
-                    module.register_buffer(name[name.rfind('.')+1:] + '_mask', torch.ones_like(param, dtype=dtype))
+            # if hasattr(layer, encode_mask_name_from_param(name, with_layer_prefix=False)):
+            #     warnings.warn(
+            #         'Parameter has a pruning mask already. '
+            #         'Reinitialize to an all-one mask.'
+            #     )
+            bname = encode_mask_name_from_param(name, with_layer_prefix=False)
+            # register_buffer 是用来在模块中添加一个不是模型参数的缓冲区的方法。
+            # 这通常用于注册一些不需要通过梯度更新的缓冲区，但是又是模型状态的一部分，比如 BatchNorm 的 running_mean。
+            # 注册缓冲区的好处是，当你保存或者移动模型时，缓冲区也会跟着保存或者移动。
+            # 注册缓冲区的方法是在模块上调用 register_buffer 方法，传入一个名字和一个初始值。
+            # 比如说：pytorch 中 BN 层的 running_mean 和 running_var 是注册在模块中的缓冲区，而不是模型参数。
+            layer.register_buffer(bname, torch.ones_like(param, dtype=dtype))
 
 
 class PrunableNet(nn.Module):
     '''Common functionality for all networks in this experiment.'''
+
+    def leaf_modules(self):
+        moudles = []
+        for name, md in self.named_modules():
+            l =  (list(md.modules()))
+            if len(l) == 1:
+                moudles.append((name, md))
+        return moudles
 
     def __init__(self, device='cpu'):
         super(PrunableNet, self).__init__()
@@ -59,7 +84,7 @@ class PrunableNet(nn.Module):
         # bits required to transmit mask and parameters?
         self.mask_size = 0
         self.param_size = 0
-        for _, layer in self.named_children():
+        for _, layer in self.leaf_modules():
             for name, param in layer.named_parameters():
                 param_size = np.prod(param.size())
                 self.param_size += param_size * 32 # FIXME: param.dtype.size?
@@ -71,18 +96,17 @@ class PrunableNet(nn.Module):
 
 
     def clear_gradients(self):
-        for _, layer in self.named_children():
-            for _, param in layer.named_parameters():
-                del param.grad
+        for _, param in self.named_parameters():
+            del param.grad
         torch.cuda.empty_cache()
 
 
-    def infer_mask(self, masking):
-        for name, param in self.state_dict().items():
-            if needs_mask(name) and name in masking.masks:
-                mask_name = name + "_mask"
-                mask = self.state_dict()[mask_name]
-                mask.copy_(masking.masks[name])
+    # def infer_mask(self, masking):
+    #     for name, param in self.state_dict().items():
+    #         if needs_mask(name) and name in masking.masks:
+    #             mask_name = encode_mask_name_from_param(name)
+    #             mask = self.state_dict()[mask_name]
+    #             mask.copy_(masking.masks[name])
 
 
     def num_flat_features(self, x):
@@ -102,13 +126,14 @@ class PrunableNet(nn.Module):
     def _weights_by_layer(self, sparsity=0.1, sparsity_distribution='erk'):
         with torch.no_grad():
             layer_names = []
-            sparsities = np.empty(len(list(self.named_children()))) # 3层layers => sparsities: [S1, S2, S3] 
+            sparsities = np.empty(len(list(self.leaf_modules()))) # 3层layers => sparsities: [S1, S2, S3] 
             # sparsities = []
             n_weights = np.zeros_like(sparsities, dtype=int)
 
-            for i, (name, layer) in enumerate(self.named_children()):
+            for i, (name, layer) in enumerate(self.leaf_modules()):
                 layer_names.append(name)
                 kernel_size = None
+
                 if isinstance(layer, nn.modules.conv._ConvNd):
                     neur_out = layer.out_channels
                     neur_in = layer.in_channels
@@ -116,6 +141,8 @@ class PrunableNet(nn.Module):
                 elif isinstance(layer, nn.Linear):
                     neur_out = layer.out_features
                     neur_in = layer.in_features
+                elif isinstance(layer, nn.modules.container.Sequential):
+                    neur_in, neur_out = self.layer_channels[name]
                 else:
                     continue
 
@@ -124,20 +151,7 @@ class PrunableNet(nn.Module):
 
                 if sparsity_distribution == 'uniform':
                     sparsities[i] = sparsity
-                    # sparsities.append(sparsity)
                     continue
-
-                # kernel_size = None
-                # if isinstance(layer, nn.modules.conv._ConvNd):
-                #     neur_out = layer.out_channels
-                #     neur_in = layer.in_channels
-                #     kernel_size = layer.kernel_size
-                # elif isinstance(layer, nn.Linear):
-                #     neur_out = layer.out_features
-                #     neur_in = layer.in_features
-                # else:
-                #     raise ValueError('Unsupported layer type ' + str(type(layer)))
-
                 if sparsity_distribution == 'er':
                     sparsities[i] = 1 - (neur_in + neur_out) / (neur_in * neur_out)
                 elif sparsity_distribution == 'erk':
@@ -170,17 +184,14 @@ class PrunableNet(nn.Module):
         #print('desired sparsity', sparsity)
         with torch.no_grad():
             weights_by_layer = self._weights_by_layer(sparsity=sparsity, sparsity_distribution=sparsity_distribution)
-            for name, layer in self.named_children():
-
+            for name, layer in self.leaf_modules():
                 # We need to figure out how many to prune
                 n_total = 0
                 for bname, buf in layer.named_buffers():
                     n_total += buf.numel()
                 n_prune = int(n_total - weights_by_layer[name])
-                if n_prune >= n_total or n_prune < 0:
+                if n_prune >= n_total or n_prune < 0 or not needs_mask(name+'.'+bname):
                     continue
-                #print('prune out', n_prune)
-
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
                         continue
@@ -190,7 +201,7 @@ class PrunableNet(nn.Module):
                         _, prune_indices = torch.topk(torch.abs(param.data.flatten()), n_prune, largest=False)
                         param.data.view(param.data.numel())[prune_indices] = 0
                         for bname, buf in layer.named_buffers():
-                            if bname == decode_buffer_name(pname) + '_mask':
+                            if bname == encode_mask_name_from_param(pname, with_layer_prefix=False):
                                 buf.view(buf.numel())[prune_indices] = 0
                         continue
 
@@ -219,13 +230,14 @@ class PrunableNet(nn.Module):
                         _, prune_indices_weight = torch.topk(paradata_tmp, n_prune_weight, largest=False)
 
                     if prune_indices_weight is not None:
+                        print('Prune-out (dir, w)', len(prune_indices_dir), len(prune_indices_weight))
                         prune_indices = torch.cat((prune_indices_dir, prune_indices_weight))
                     else:
                         _, prune_indices = torch.topk(torch.abs(param.data.flatten()), n_prune, largest=False)
 
                     param.data.view(param.data.numel())[prune_indices] = 0
                     for bname, buf in layer.named_buffers():
-                        if bname == decode_buffer_name(pname) + '_mask':
+                        if bname == encode_mask_name_from_param(pname, with_layer_prefix=False):
                             buf.view(buf.numel())[prune_indices] = 0
             #print('pruned sparsity', self.sparsity())
 
@@ -244,7 +256,7 @@ class PrunableNet(nn.Module):
         #print('desired sparsity', sparsity)
         with torch.no_grad():
             weights_by_layer = self._weights_by_layer(sparsity=sparsity, sparsity_distribution=sparsity_distribution)
-            for name, layer in self.named_children():
+            for name, layer in self.leaf_modules():
 
                 # We need to figure out how many to grow
                 n_nonzero = 0
@@ -253,7 +265,7 @@ class PrunableNet(nn.Module):
                 n_grow = int(weights_by_layer[name] - n_nonzero) # 期望的非0参数的个数
                 if n_grow < 0:
                     continue
-                #print('grow from', n_nonzero, 'to', weights_by_layer[name])
+                print('Grow (total)', n_grow)
 
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
@@ -264,7 +276,7 @@ class PrunableNet(nn.Module):
                         _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)
                         param.data.view(param.data.numel())[grow_indices] = 0
                         for bname, buf in layer.named_buffers():
-                            if bname == decode_buffer_name(pname) + '_mask':
+                            if bname == encode_mask_name_from_param(pname, with_layer_prefix=False):
                                 buf.view(buf.numel())[grow_indices] = 1
                         continue
 
@@ -291,6 +303,7 @@ class PrunableNet(nn.Module):
                         _, grow_indices_grad = torch.topk(para_grad_tmp, n_grow_grad, largest=True)
 
                     if grow_indices_grad is not None:
+                        print('Grow (dir, grad)', len(grow_indices_dir), len(grow_indices_grad))
                         grow_indices = torch.cat((grow_indices_dir, grow_indices_grad))
                     else:
                         _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)
@@ -298,7 +311,7 @@ class PrunableNet(nn.Module):
                     # Write and apply mask
                     param.data.view(param.data.numel())[grow_indices] = 0
                     for bname, buf in layer.named_buffers():
-                        if bname == decode_buffer_name(pname) + '_mask':
+                        if bname == encode_mask_name_from_param(pname, with_layer_prefix=False):
                             buf.view(buf.numel())[grow_indices] = 1
             #print('grown sparsity', self.sparsity())
 
@@ -354,8 +367,8 @@ class PrunableNet(nn.Module):
                 if not needs_mask(name):
                     continue
 
-                n_differences += torch.count_nonzero(state[name + '_mask'].to('cpu') ^ masks[i].to('cpu'))
-                state[name + '_mask'] = masks[i]
+                n_differences += torch.count_nonzero(state[encode_mask_name_from_param(name)].to('cpu') ^ masks[i].to('cpu'))
+                state[encode_mask_name_from_param(name)] = masks[i]
                 i += 1
 
             print('mask changed percent', n_differences / cat_imp.numel())
@@ -368,7 +381,7 @@ class PrunableNet(nn.Module):
         with torch.no_grad():
             # prune (self.pruning_rate) of the remaining weights
             parameters_to_prune = []
-            layers_to_prune = (layer for _, layer in self.named_children())
+            layers_to_prune = (layer for _, layer in self.leaf_modules())
             for layer in layers_to_prune:
                 for name, param in layer.named_parameters():
                     if needs_mask(name):
@@ -381,13 +394,14 @@ class PrunableNet(nn.Module):
                 amount=pruning_rate
             )
 
-
+    # Seems not get called at all.
     def grow(self, indices):
         with torch.no_grad():
             state = self.state_dict()
             keys = list(state.keys())
             for grow_index in indices:
-                mask_name = keys[grow_index[0]] + "_mask"
+                # mask_name = keys[grow_index[0]] + "_mask"
+                mask_name = encode_mask_name_from_param(keys[grow_index[0]])
                 state[mask_name].flatten()[grow_index[1]] = 1
             self.load_state_dict(state)
 
@@ -438,12 +452,9 @@ class PrunableNet(nn.Module):
                     # skip masks, since we will copy them with their corresponding
                     # layers, from the mask source.
                     continue
-
                 new_state[name] = local_state[name]
-
-                mask_name = name + '_mask'
-                if needs_mask(name) and mask_name in apply_mask_source:
-
+                if needs_mask(name) and encode_mask_name_from_param(name) in apply_mask_source:
+                    mask_name =  encode_mask_name_from_param(name)
                     mask_to_apply = apply_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     mask_to_copy = copy_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     gpu_param = param[mask_to_apply].to(self.device)
@@ -472,7 +483,6 @@ class PrunableNet(nn.Module):
                 # clean up copies made to gpu
                 if gpu_param.data_ptr() != param.data_ptr():
                     del gpu_param
-
             self.load_state_dict(new_state)
         return mask_changed
 
@@ -513,7 +523,7 @@ class PrunableNet(nn.Module):
             for i, (name, param) in enumerate(state.items()):
                 if name.endswith('_mask') or not needs_mask(name):
                     continue
-                mask_name = name + '_mask'
+                mask_name = encode_mask_name_from_param(name)
                 haystack = param - last_state[name]
                 if mask_name in state and mask_behavior != 'all':
                     mask = state[mask_name]
@@ -677,9 +687,9 @@ class Conv2(PrunableNet):
 
 
 class ResNet(PrunableNet):
-    def __init__(self, block, layers, classes=7, num_channels=3, **kwargs):
+    def __init__(self, block, layers, *args, classes=7, num_channels=3, **kwargs):
         self.inplanes = 64
-        super(ResNet, self).__init__()
+        super(ResNet, self).__init__(*args,  **kwargs)
         self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=7, stride=2, padding=3,
                                bias=False)
         self.bn1 = nn.BatchNorm2d(64)
@@ -689,6 +699,10 @@ class ResNet(PrunableNet):
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2) # 
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+        self.layer_channels = {'layer1': (64, 64),
+                               'layer2': (64, 128),
+                               'layer3': (128, 256),
+                               'layer4': (256, 512)}
         self.avgpool = nn.AvgPool2d(7, stride=1)
         self.class_classifier = nn.Linear(512 * block.expansion, classes)
 
@@ -698,6 +712,7 @@ class ResNet(PrunableNet):
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+        self.init_param_sizes()
 
     # stride 参数决定了 该 Residual Layer 的第一个 block 的 stride，进而决定了这个layer 会不会缩减图片尺寸
     # res18 里只有第一个 Layer 不需要缩减，其他 Layer 都需要减半尺寸
@@ -739,12 +754,13 @@ class ResNet(PrunableNet):
         out = self.class_classifier(x)
         # layers_output_dict['fc']=out
         return out
-def resnet18(pretrained=True, **kwargs):
+
+def resnet18(pretrained=False, *args, **kwargs):
     """Constructs a ResNet-18 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
-    model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
+    model = ResNet(BasicBlock, [2, 2, 2, 2],*args, **kwargs)
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls['resnet18']), strict=False)
     return model
@@ -806,7 +822,8 @@ all_models = {
         'emnist': Conv2,
         'cifar10': CIFAR10Net,
         'cifar100': CIFAR100Net,
-        'pacs': VggNet,
-        'office': resnet18,
+        'pacs': resnet18,
+        # 'pacs': VggNet,
+        'office': VggNet,
         'office-home': resnet18,
 }
