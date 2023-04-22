@@ -12,7 +12,7 @@ from tqdm import tqdm
 from datasets import get_dataset
 # import models
 from client import Client
-from models import all_models, needs_mask, initialize_mask, encode_mask_name_from_param, decode_param_name_from_mask
+from models import all_models, needs_mask, initialize_mask
 
 rng = np.random.default_rng()
 
@@ -352,15 +352,15 @@ for server_round in range(args.rounds): # 默认 400
         aggregated_mask_params[name] = F.threshold_(aggregated_mask_params[name], args.min_votes, 0)
         # otherwise, we are taking the weighted average w.r.t. the number of 
         # samples present on each of the clients.
-        aggregated_weight_params[name] /= aggregated_weight_params[name]
-        aggregated_weight_params_needmsk[name] /= aggregated_weight_params_needmsk[name]
+        aggregated_weight_params[name] /= aggregated_mask_params[name]
+        aggregated_weight_params_needmsk[name] /= aggregated_mask_params[name]
         aggregated_mask_params[name] /= aggregated_mask_params[name]
         # it's possible that some weights were pruned by all clients. In this
         # case, we will have divided by zero. Those values have already been
         # pruned out, so the values here are only placeholders.
         aggregated_weight_params[name] = torch.nan_to_num(aggregated_weight_params[name],
                                                    nan=0.0, posinf=0.0, neginf=0.0)
-        aggregated_weight_params_needmsk[name] = torch.nan_to_num(aggregated_weight_params_needmsk[name],
+        aggregated_weight_params_needmsk[name] = torch.nan_to_num(aggregated_weight_params[name],
                                                    nan=0.0, posinf=0.0, neginf=0.0)
         aggregated_mask_params[name] = torch.nan_to_num(aggregated_mask_params[name],
                                                   nan=0.0, posinf=0.0, neginf=0.0)
@@ -385,12 +385,15 @@ for server_round in range(args.rounds): # 默认 400
     # discard old weights and apply new mask
     global_state = global_model.state_dict()
     aggregated_state = aggregated_weight_params # 这里的 aggregated_state 没有 mask，只有 weight
+
     for name, mask in aggregated_mask_params.items():
         delta_weight = global_state[name] - global_state_pre_rd[name]
         global_params_direction[name] = torch.sign(delta_weight)
+
         new_mask = global_state[name+'_mask']
         aggregated_state[name+'_mask'] = new_mask
         aggregated_state[name][~new_mask] = 0
+
     global_model.load_state_dict(aggregated_state) # 这次所有的 bias 啥的都 load进去了
 
     # evaluate performance

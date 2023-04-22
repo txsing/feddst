@@ -111,8 +111,8 @@ class Client:
                 self.optimizer.step()
 
                 self.reset_weights() # applies the mask
-                if len(self.train_data) % 10 == 0:
-                    print(f"iteration: {i}, loss: {loss.item()}")
+                # if i % 10 == 0:
+                #     print(f"iteration: {i}, loss: {loss.item()}")
                 running_loss += loss.item()
 
             if (self.curr_epoch - self.global_args.pruning_begin) % self.global_args.pruning_interval == 0 and readjust:

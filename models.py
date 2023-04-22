@@ -14,30 +14,6 @@ from collections import OrderedDict
 
 
 # Utility functions
-def encode_buffer_name(name):
-    return name.replace('.', '@')
-
-def decode_buffer_name(name):
-    return name.replace('@', '.')
-
-def encode_mask_name_from_param(name, with_layer_prefix=True):
-    mask_name = name + '_mask'
-    # if with_layer_prefix:
-    #     layer_name, para_name = name.split('.', 1)
-    #     mask_name =  layer_name + '.' + encode_buffer_name(para_name) + '_mask'
-    # else:
-    #     mask_name = encode_buffer_name(name) + '_mask'
-    # if mask_name == 'layer1.0.conv1.weight_mask':
-    #    raise Exception('mask_name: ', mask_name)
-    return mask_name
-
-def decode_param_name_from_mask(name, with_layer_prefix=True):
-    return name[:-5]
-    # if with_layer_prefix:
-    #     layer_name, para_name = name.split('.', 1)
-    #     return layer_name + '.' + decode_buffer_name(para_name[:-5])
-    # return decode_buffer_name(name[:-5])
-
 def needs_mask(name):
     return (name.endswith('weight')) and ('bn' not in name)
 
@@ -48,19 +24,18 @@ def initialize_mask(model, dtype=torch.bool):
         for name, param in layer.named_parameters():
             if not needs_mask(layername + '.' +name):
                 continue
-            # if hasattr(layer, encode_mask_name_from_param(name, with_layer_prefix=False)):
-            #     warnings.warn(
-            #         'Parameter has a pruning mask already. '
-            #         'Reinitialize to an all-one mask.'
-            #     )
-            bname = encode_mask_name_from_param(name, with_layer_prefix=False)
+            if hasattr(layer, layername + '.' +name + '_mask'):
+                warnings.warn(
+                    'Parameter has a pruning mask already. '
+                    'Reinitialize to an all-one mask.'
+                )
+            bname = name + '_mask'
             # register_buffer 是用来在模块中添加一个不是模型参数的缓冲区的方法。
             # 这通常用于注册一些不需要通过梯度更新的缓冲区，但是又是模型状态的一部分，比如 BatchNorm 的 running_mean。
             # 注册缓冲区的好处是，当你保存或者移动模型时，缓冲区也会跟着保存或者移动。
             # 注册缓冲区的方法是在模块上调用 register_buffer 方法，传入一个名字和一个初始值。
             # 比如说：pytorch 中 BN 层的 running_mean 和 running_var 是注册在模块中的缓冲区，而不是模型参数。
             layer.register_buffer(bname, torch.ones_like(param, dtype=dtype))
-
 
 class PrunableNet(nn.Module):
     '''Common functionality for all networks in this experiment.'''
@@ -72,6 +47,7 @@ class PrunableNet(nn.Module):
             if len(l) == 1:
                 moudles.append((name, md))
         return moudles
+
 
     def __init__(self, device='cpu'):
         super(PrunableNet, self).__init__()
@@ -101,12 +77,12 @@ class PrunableNet(nn.Module):
         torch.cuda.empty_cache()
 
 
-    # def infer_mask(self, masking):
-    #     for name, param in self.state_dict().items():
-    #         if needs_mask(name) and name in masking.masks:
-    #             mask_name = encode_mask_name_from_param(name)
-    #             mask = self.state_dict()[mask_name]
-    #             mask.copy_(masking.masks[name])
+    def infer_mask(self, masking):
+        for name, param in self.state_dict().items():
+            if needs_mask(name) and name in masking.masks:
+                mask_name = name + '_mask'
+                mask = self.state_dict()[mask_name]
+                mask.copy_(masking.masks[name])
 
 
     def num_flat_features(self, x):
@@ -201,7 +177,7 @@ class PrunableNet(nn.Module):
                         _, prune_indices = torch.topk(torch.abs(param.data.flatten()), n_prune, largest=False)
                         param.data.view(param.data.numel())[prune_indices] = 0
                         for bname, buf in layer.named_buffers():
-                            if bname == encode_mask_name_from_param(pname, with_layer_prefix=False):
+                            if bname == pname + '_mask':
                                 buf.view(buf.numel())[prune_indices] = 0
                         continue
 
@@ -237,7 +213,7 @@ class PrunableNet(nn.Module):
 
                     param.data.view(param.data.numel())[prune_indices] = 0
                     for bname, buf in layer.named_buffers():
-                        if bname == encode_mask_name_from_param(pname, with_layer_prefix=False):
+                        if bname == pname + '_mask':
                             buf.view(buf.numel())[prune_indices] = 0
             #print('pruned sparsity', self.sparsity())
 
@@ -276,7 +252,7 @@ class PrunableNet(nn.Module):
                         _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)
                         param.data.view(param.data.numel())[grow_indices] = 0
                         for bname, buf in layer.named_buffers():
-                            if bname == encode_mask_name_from_param(pname, with_layer_prefix=False):
+                            if bname == pname + '_mask':
                                 buf.view(buf.numel())[grow_indices] = 1
                         continue
 
@@ -311,7 +287,7 @@ class PrunableNet(nn.Module):
                     # Write and apply mask
                     param.data.view(param.data.numel())[grow_indices] = 0
                     for bname, buf in layer.named_buffers():
-                        if bname == encode_mask_name_from_param(pname, with_layer_prefix=False):
+                        if bname == pname + '_mask':
                             buf.view(buf.numel())[grow_indices] = 1
             #print('grown sparsity', self.sparsity())
 
@@ -367,8 +343,8 @@ class PrunableNet(nn.Module):
                 if not needs_mask(name):
                     continue
 
-                n_differences += torch.count_nonzero(state[encode_mask_name_from_param(name)].to('cpu') ^ masks[i].to('cpu'))
-                state[encode_mask_name_from_param(name)] = masks[i]
+                n_differences += torch.count_nonzero(state[name + '_mask'].to('cpu') ^ masks[i].to('cpu'))
+                state[name + '_mask'] = masks[i]
                 i += 1
 
             print('mask changed percent', n_differences / cat_imp.numel())
@@ -400,8 +376,7 @@ class PrunableNet(nn.Module):
             state = self.state_dict()
             keys = list(state.keys())
             for grow_index in indices:
-                # mask_name = keys[grow_index[0]] + "_mask"
-                mask_name = encode_mask_name_from_param(keys[grow_index[0]])
+                mask_name = keys[grow_index[0]] + "_mask"
                 state[mask_name].flatten()[grow_index[1]] = 1
             self.load_state_dict(state)
 
@@ -453,8 +428,8 @@ class PrunableNet(nn.Module):
                     # layers, from the mask source.
                     continue
                 new_state[name] = local_state[name]
-                if needs_mask(name) and encode_mask_name_from_param(name) in apply_mask_source:
-                    mask_name =  encode_mask_name_from_param(name)
+                if needs_mask(name) and (name + '_mask') in apply_mask_source:
+                    mask_name =  name + '_mask'
                     mask_to_apply = apply_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     mask_to_copy = copy_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     gpu_param = param[mask_to_apply].to(self.device)
@@ -523,7 +498,7 @@ class PrunableNet(nn.Module):
             for i, (name, param) in enumerate(state.items()):
                 if name.endswith('_mask') or not needs_mask(name):
                     continue
-                mask_name = encode_mask_name_from_param(name)
+                mask_name = name + '_mask'
                 haystack = param - last_state[name]
                 if mask_name in state and mask_behavior != 'all':
                     mask = state[mask_name]
