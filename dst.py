@@ -106,17 +106,20 @@ def nan_to_num(x, nan=0, posinf=0, neginf=0):
 def evaluate_global_model(global_model, loaders):
     target_loaders = [(dm, loaders[dm]) for dm in args.target] if args.use_DG_dataset else loaders.items()
     global_test_data = []
-    for _, (_, client_loaders) in enumerate(target_loaders):
-        _, _, test_data = client_loaders
+    for _, (_, cl_loaders) in enumerate(target_loaders):
+        _, _, test_data = cl_loaders
         global_test_data += test_data
+    return evaluate_model(global_model, global_test_data)
 
+
+def evaluate_model(model, test_data):
     with torch.no_grad():
         correct = 0.
         total = 0.
-        _model = global_model.to(devices[0])
+        _model = model.to(devices[0])
         _model.eval()
         with torch.no_grad():
-            for i, (inputs, labels) in enumerate(global_test_data):
+            for i, (inputs, labels) in enumerate(test_data):
                 if not args.cache_test_set_gpu:
                     inputs = inputs.to(devices[0])
                     labels = labels.to(devices[0])
@@ -124,23 +127,26 @@ def evaluate_global_model(global_model, loaders):
                 outputs = torch.argmax(outputs, dim=-1)
                 correct += sum(labels == outputs)
                 total += len(labels)
-        global_model_acc = correct / total 
-    return global_model_acc
+        global_model_acc = correct / total
+        return global_model_acc
 
-def evaluate_global_clients(clients, global_model, loaders, progress=False, n_batches=0):
+
+def evaluate_global_clients(client_ids, global_model, progress=False, n_batches=0):
     with torch.no_grad():
         accuracies = {}
         sparsities = {}
 
         if progress:
-            enumerator = tqdm(clients.items())
+            enumerator = tqdm(client_ids)
         else:
-            enumerator = clients.items()
+            enumerator = client_ids
 
-        for client_id, client in enumerator:
-            accuracies[client_id] = client.test(model=global_model).item()
+        for client_id in enumerator:
+            _, _, test_data = client_loaders[client_id]
+            accuracies[client_id] = evaluate_model(global_model, test_data)
+            client = get_client_instance(client_id)
             sparsities[client_id] = client.sparsity()
-        
+
     return accuracies, sparsities
 
 
@@ -188,9 +194,9 @@ else:
 loaders = get_dataset(args.dataset, clients=args.total_clients, mode=args.distribution,
                       beta=args.beta, batch_size=args.batch_size, devices=cache_devices,
                       min_samples=args.min_samples, samples=args.samples_per_client)
+
 # initialize clients
 print('Initializing clients...')
-clients = {}
 client_ids = []
 dataset_classes = {
     'mnist': 10,
@@ -201,15 +207,20 @@ dataset_classes = {
     'vlcs': 5,
 }
 
-client_loaders = [(dm, loaders[dm]) for dm in args.source] if args.use_DG_dataset else loaders.items()
+clients_loaders_map = [(dm, loaders[dm]) for dm in args.source] if args.use_DG_dataset else list(loaders.items())
+client_epochs = {}
+client_loaders = {}
 # for i, (client_id, client_loaders) in tqdm(enumerate(loaders.items())):
-for i, (client_id, client_loaders) in enumerate(client_loaders):
-    cl = Client(client_id, *client_loaders, net=all_models[args.dataset],
-                learning_rate=args.eta, local_epochs=args.epochs,
-                target_sparsity=args.sparsity, classes=dataset_classes[args.dataset], global_args=args)
-    print(f"Client-{client_id}: {len(cl.train_data)} iters/epoch")
-    clients[client_id] = cl
+for i, (client_id, cl_loaders) in enumerate(clients_loaders_map):
+    # cl = Client(client_id, *cl_loaders, net=all_models[args.dataset],
+    #             learning_rate=args.eta, local_epochs=args.epochs,
+    #             target_sparsity=args.sparsity, classes=dataset_classes[args.dataset], global_args=args)
+    device, train_data, test_data = cl_loaders
+    print(f"Client-{client_id}: {len(train_data)} iters/epoch")
+    # clients[client_id] = cl
     client_ids.append(client_id)
+    client_epochs[client_id] = 0
+    client_loaders[client_id] = cl_loaders
     torch.cuda.empty_cache()
 
 # initialize global model
@@ -222,19 +233,45 @@ initial_global_state = deepcopy(global_model.state_dict())
 
 # we need to accumulate compute/DL/UL costs regardless of round number, resetting only
 # when we actually report these numbers
-compute_times = np.zeros(len(clients)) # time in seconds taken on client-side for round
-download_cost = np.zeros(len(clients))
-upload_cost = np.zeros(len(clients))
+compute_times = np.zeros(len(client_ids)) # time in seconds taken on client-side for round
+download_cost = np.zeros(len(client_ids))
+upload_cost = np.zeros(len(client_ids))
 
-print(f'Total clients: {clients.keys()}')
+print(f'Total clients: {client_ids}')
 # for each round t = 1, 2, ... do
 # for server_round in tqdm(range(args.rounds)): # 默认 400
-cumulative_ul,cumulative_dl = 0, 0
+cumulative_ul, cumulative_dl = 0, 0
 global_params_direction = {}
+
+dataset_classes = {
+    'mnist': 10,
+    'cifar10': 10,
+    'cifar100': 100,
+    'pacs': 7,
+    'officehome': 65,
+    'vlcs': 5,
+}
+
+client_temp_models = {}
+for device in cache_devices:
+    device_idx = 'cpu' if device.type == 'cpu' else str(device.index)
+    client_temp_model = all_models[args.dataset](device=device, classes=dataset_classes[args.dataset]).to(device)
+    client_temp_models[device_idx] = client_temp_model
+
+def get_client_model(device):
+    device_idx = 'cpu' if device.type == 'cpu' else str(device.index)
+    return client_temp_models[device_idx]
+
+def get_client_instance(client_id):
+    device, train_data, test_data = client_loaders[client_id]
+    client = Client(i, device, train_data, test_data, net=get_client_model(device),
+                    learning_rate=args.eta, local_epochs=args.epochs,
+                    target_sparsity=args.sparsity, classes=dataset_classes[args.dataset], global_args=args, curr_epoch=client_epochs[client_id])
+    return client
 
 for server_round in range(args.rounds): # 默认 400
     # sample clients
-    client_indices = rng.choice(list(clients.keys()), size=args.clients, replace=False)
+    client_indices = rng.choice(list(client_ids), size=args.clients, replace=False)
     print_to_log(f"Selected clients: {client_indices} at round {server_round+1}")
 
     global_state = global_model.state_dict()
@@ -254,9 +291,13 @@ for server_round in range(args.rounds): # 默认 400
     # for each client k \in S_t in parallel do
     total_sampled = 0
     for client_id in client_indices:
-        client = clients[client_id]
-
+        # client = clients[client_id]
         i = client_ids.index(client_id)
+        client = get_client_instance(client_id)
+        # device, train_data, test_data = client_loaders[client_id]
+        # client = Client(i, device, train_data, test_data, net=get_client_model(device),
+        #                 learning_rate=args.eta, local_epochs=args.epochs,
+        #                 target_sparsity=args.sparsity, classes=dataset_classes[args.dataset], global_args=args, curr_epoch=client_epochs[client_id])
         # Local client training.
         t0 = time.process_time()
 
@@ -279,6 +320,7 @@ for server_round in range(args.rounds): # 默认 400
                                     readjust=readjust, sparsity=round_sparsity, global_params_direction=global_params_direction)
 
         print_to_log(f'R-{server_round}: Client-{client_id} S.S:{round_sparsity}; C.S:{client.sparsity()}; ReAdjust:{readjustment_ratio}')
+        client_epochs[client_id] = client_epochs[client_id] + 1
         client_state = train_result['state'] # with mask_name
 
         download_cost[i] = train_result['dl_cost']
@@ -344,7 +386,9 @@ for server_round in range(args.rounds): # 默认 400
     for name, param in aggregated_weight_params.items():
         # if this parameter has no associated mask, simply take the average.
         if name not in aggregated_mask_params:
-            aggregated_weight_params[name] /= sum(clients[i].train_size() for i in client_indices)
+            
+            train_size = sum(len(x) for x in client_loaders[client_id][1])
+            aggregated_weight_params[name] /= sum(train_size for i in client_indices)
             continue
         
         # 接下里的 name 都是需要 mask 的。
@@ -399,14 +443,15 @@ for server_round in range(args.rounds): # 默认 400
     # evaluate performance
     torch.cuda.empty_cache()
     if server_round % args.eval_every == 0 and args.eval:
-        accuracies, sparsities = evaluate_global_clients(clients, global_model, loaders, progress=False,
+        accuracies, sparsities = evaluate_global_clients(client_ids, global_model, progress=False,
                                                  n_batches=args.test_batches)
 
     global_acc = evaluate_global_model(global_model, loaders)
-    for client_id in clients:
+    for client_id in client_ids:
         i = client_ids.index(client_id)
         if server_round == 0:
-            clients[client_id].initial_global_params = initial_global_state
+            client = get_client_instance(client_id)
+            client.initial_global_params = initial_global_state
         if (server_round % args.eval_every == 0) and args.eval:
             print_csv_line(
                 # pid=args.pid,
