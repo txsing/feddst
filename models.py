@@ -587,8 +587,6 @@ class CIFAR10Net(PrunableNet):
         x = F.relu(self.fc2(x))
         x = F.softmax(self.fc3(x), dim=1)
         return x
-
-
 class CIFAR100Net(PrunableNet):
 
     def __init__(self, classes=100, *args, **kwargs):
@@ -741,30 +739,50 @@ def resnet18(pretrained=False, *args, **kwargs):
     return model
 
 
+
+
 class VggNet(PrunableNet):
-    def __init__(self, *args, classes=7, **kwargs):
+    def __init__(self, *args, classes=7, vgg_no='vgg11', **kwargs):
         super(VggNet, self).__init__(*args,  **kwargs)
+        self.vgg_no = vgg_no
         model = torchvision.models.vgg16(num_classes=classes)
-        self.feature_layer_names = ['conv1_1', 'relu1_1',
-             'conv1_2', 'relu1_2',
-             'pool1',
-             'conv2_1', 'relu2_1',
-             'conv2_2', 'relu2_2',
-             'pool2',
-             'conv3_1', 'relu3_1',
-             'conv3_2', 'relu3_2',
-             'conv3_3', 'relu3_3',
-             'pool3',
-             'conv4_1', 'relu4_1',
-             'conv4_2', 'relu4_2',
-             'conv4_3', 'relu4_3',
-             'pool4',
-             'conv5_1', 'relu5_1',
-             'conv5_2', 'relu5_2',
-             'conv5_3', 'relu5_3',
-             'pool5']
-        for idx in range(len(self.feature_layer_names)):
-            setattr(self, self.feature_layer_names[idx], model.features[idx])
+        
+        self.feature_layer_names = {
+            'vgg11': ['conv1_1', 'relu1_1',
+                   'pool1',
+                   'conv2_1', 'relu2_1',
+                   'pool2',
+                   'conv3_1', 'relu3_1',
+                   'conv3_2', 'relu3_2',
+                   'pool3',
+                   'conv4_1', 'relu4_1',
+                   'conv4_2', 'relu4_2',
+                   'pool4',
+                   'conv5_1', 'relu5_1',
+                   'conv5_2', 'relu5_2',
+                   'pool5'],
+            'vgg16': ['conv1_1', 'relu1_1',
+                   'conv1_2', 'relu1_2',
+                   'pool1',
+                   'conv2_1', 'relu2_1',
+                   'conv2_2', 'relu2_2',
+                   'pool2',
+                   'conv3_1', 'relu3_1',
+                   'conv3_2', 'relu3_2',
+                   'conv3_3', 'relu3_3',
+                   'pool3',
+                   'conv4_1', 'relu4_1',
+                   'conv4_2', 'relu4_2',
+                   'conv4_3', 'relu4_3',
+                   'pool4',
+                   'conv5_1', 'relu5_1',
+                   'conv5_2', 'relu5_2',
+                   'conv5_3', 'relu5_3',
+                   'pool5']
+             }
+        
+        for idx in range(len(self.feature_layer_names[vgg_no])):
+            setattr(self, self.feature_layer_names[vgg_no][idx], model.features[idx])
 
 
         # layers = collections.OrderedDict(zip(self.layer_names, model.features))
@@ -782,7 +800,7 @@ class VggNet(PrunableNet):
         self.init_param_sizes()
 
     def forward(self, x, **kwargs):
-        for layername in self.feature_layer_names:
+        for layername in self.feature_layer_names[self.vgg_no]:
             x = getattr(self, layername)(x)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
@@ -791,14 +809,24 @@ class VggNet(PrunableNet):
         # x = self.classifier(x)
         return  x
 
+def vgg11(pretrained=False, *args, **kwargs):
+    model = VggNet(*args, **kwargs, vgg_no='vgg11')
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['vgg11']), strict=False)
+    return model
+
+def vgg16(pretrained=False, *args, **kwargs):
+    model = VggNet(*args, **kwargs, vgg_no='vgg16')
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['vgg16']), strict=False)
+    return model
+
 all_models = {
         'mnist': MNISTNet,
-        # 'mnist': Conv2,
         'emnist': Conv2,
-        'cifar10': CIFAR10Net,
-        'cifar100': CIFAR100Net,
+        'cifar10': vgg11,
+        'cifar100': vgg16,
         'pacs': resnet18,
-        # 'pacs': VggNet,
-        'office': VggNet,
+        'office': resnet18,
         'office-home': resnet18,
 }

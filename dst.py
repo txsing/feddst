@@ -24,9 +24,9 @@ def device_list(x):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--eta', type=float, help='learning rate', default=0.01)
-parser.add_argument('--clients', type=int, help='number of clients per round', default=20)
-parser.add_argument('--rounds', type=int, help='number of global rounds', default=400)
-parser.add_argument('--epochs', type=int, help='number of local epochs', default=10)
+parser.add_argument('-C', '--clients', type=int, help='number of clients per round', default=20)
+parser.add_argument('-R', '--rounds', type=int, help='number of global rounds', default=400)
+parser.add_argument('-E','--epochs', type=int, help='number of local epochs', default=10)
 parser.add_argument('--dataset', type=str, choices=('mnist', 'emnist', 'cifar10', 'cifar100','pacs', 'office', 'officehome'),
                     default='mnist', help='Dataset to use')
 parser.add_argument("--source", nargs='+', help='specified when using DG datasets')
@@ -34,13 +34,13 @@ parser.add_argument("--target", nargs='+', help="Target")
 parser.add_argument('--distribution', type=str, choices=('dirichlet', 'lotteryfl', 'iid'), default='dirichlet',
                     help='how should the dataset be distributed?')
 parser.add_argument('--beta', type=float, default=0.1, help='Beta parameter (unbalance rate) for Dirichlet distribution')
-parser.add_argument('--total-clients', type=int, help='split the dataset between this many clients. Ignored for EMNIST.', default=400)
+parser.add_argument('-K', '--total-clients', type=int, help='split the dataset between this many clients. Ignored for EMNIST.', default=400)
 parser.add_argument('--min-samples', type=int, default=0, help='minimum number of samples required to allow a client to participate')
-parser.add_argument('--samples-per-client', type=int, default=20, help='samples to allocate to each client (per class, for lotteryfl, or per client, for iid)')
+parser.add_argument('--samples-per-client', type=int, default=0, help='samples to allocate to each client (per class, for lotteryfl, or per client, for iid)')
 parser.add_argument('--prox', type=float, default=0, help='coefficient to proximal term (i.e. in FedProx)')
 
 # Pruning and regrowth options
-parser.add_argument('--sparsity', type=float, default=0.1, help='sparsity from 0 to 1')
+parser.add_argument('-S', '--sparsity', type=float, default=0.1, help='sparsity from 0 to 1')
 parser.add_argument('-d', '--direction-ratio', type=float, default=0.0, help='from 0 to 1')
 parser.add_argument('--rate-decay-method', default='cosine', choices=('constant', 'cosine'), help='annealing for readjustment ratio')
 parser.add_argument('--rate-decay-end', default=None, type=int, help='round to end annealing')
