@@ -166,7 +166,7 @@ class PrunableNet(nn.Module):
                 for bname, buf in layer.named_buffers():
                     n_total += buf.numel()
                 n_prune = int(n_total - weights_by_layer[name])
-                if n_prune >= n_total or n_prune < 0 or not needs_mask(name+'.'+bname):
+                if n_prune >= n_total or n_prune < 0:
                     continue
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
@@ -531,6 +531,7 @@ class PrunableNet(nn.Module):
         mask_size = 0
         for name, buf in buffers:
             if name.endswith('mask'):
+                # print(name, torch.sum(buf), buf.nelement())
                 n_ones += torch.sum(buf)
                 mask_size += buf.nelement()
 
@@ -749,18 +750,18 @@ class VggNet(PrunableNet):
         
         self.feature_layer_names = {
             'vgg11': ['conv1_1', 'relu1_1',
-                   'pool1',
-                   'conv2_1', 'relu2_1',
-                   'pool2',
-                   'conv3_1', 'relu3_1',
-                   'conv3_2', 'relu3_2',
-                   'pool3',
-                   'conv4_1', 'relu4_1',
-                   'conv4_2', 'relu4_2',
-                   'pool4',
-                   'conv5_1', 'relu5_1',
-                   'conv5_2', 'relu5_2',
-                   'pool5'],
+                      'conv1_2', 'relu1_2',
+                      'pool1',
+                      'conv2_1', 'relu2_1',
+                      'conv2_2', 'relu2_2',
+                      'pool2',
+                      'conv3_1', 'relu3_1',
+                      'conv3_2', 'relu3_2',
+                      'conv3_3', 'relu3_3',
+                      'pool3',
+                      'conv4_1', 'relu4_1',
+                      'conv4_2', 'relu4_2',
+                      ],
             'vgg16': ['conv1_1', 'relu1_1',
                    'conv1_2', 'relu1_2',
                    'pool1',

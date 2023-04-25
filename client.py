@@ -8,7 +8,7 @@ from models import all_models, needs_mask, initialize_mask
 class Client:
 
     def __init__(self, id, device, train_data, test_data, net=models.MNISTNet,
-                 local_epochs=10, learning_rate=0.01, target_sparsity=0.1, classes=10, global_args=None):
+                 local_epochs=10, learning_rate=0.01, target_sparsity=0.1, classes=10, global_args=None, curr_epoch=0):
         '''Construct a new client.
 
         Parameters:
@@ -31,7 +31,8 @@ class Client:
         self.train_data, self.test_data = train_data, test_data
 
         self.device = device
-        self.net = net(device=self.device, classes=classes).to(self.device)
+        # self.net = net(device=self.device, classes=classes).to(self.device)
+        self.net = net
         initialize_mask(self.net)
         self.criterion = nn.CrossEntropyLoss()
 
@@ -39,7 +40,7 @@ class Client:
         self.reset_optimizer()
 
         self.local_epochs = local_epochs
-        self.curr_epoch = 0
+        self.curr_epoch = curr_epoch
 
         # save the initial global params given to us by the server
         # for LTH pruning later.
@@ -62,7 +63,7 @@ class Client:
         return sum(len(x) for x in self.train_data)
 
 
-    # 这里的这个 initial_global_params 似乎没啥用
+    # 这里的这个 initial_global_params 似乎没啥用，据说是给 PruneFL 的实现使用的
     def train(self, global_params=None, initial_global_params=None,
               readjustment_ratio=0.5, readjust=False, sparsity=0.0, global_params_direction={}):
         '''Train the client network for a single round.'''
@@ -110,7 +111,7 @@ class Client:
                 loss.backward()
                 self.optimizer.step()
 
-                self.reset_weights() # applies the mask
+                self.reset_weights() # applies the mask, without changing weights.
                 # if i % 10 == 0:
                 #     print(f"iteration: {i}, loss: {loss.item()}")
                 running_loss += loss.item()
