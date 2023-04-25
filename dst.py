@@ -23,7 +23,7 @@ def device_list(x):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--eta', type=float, help='learning rate', default=0.01)
+parser.add_argument('--lr', type=float, help='learning rate', default=0.01)
 parser.add_argument('-C', '--clients', type=int, help='number of clients per round', default=20)
 parser.add_argument('-R', '--rounds', type=int, help='number of global rounds', default=400)
 parser.add_argument('-E','--epochs', type=int, help='number of local epochs', default=10)
@@ -264,7 +264,7 @@ def get_client_model(device):
 def get_client_instance(client_id):
     device, train_data, test_data = client_loaders[client_id]
     client = Client(i, device, train_data, test_data, net=get_client_model(device),
-                    learning_rate=args.eta, local_epochs=args.epochs,
+                    learning_rate=args.lr, local_epochs=args.epochs,
                     target_sparsity=args.sparsity, classes=dataset_classes[args.dataset], global_args=args, curr_epoch=client_epochs[client_id])
     return client
 
@@ -290,13 +290,8 @@ for server_round in range(args.rounds): # 默认 400
     # for each client k \in S_t in parallel do
     total_sampled = 0
     for client_id in client_indices:
-        # client = clients[client_id]
         i = client_ids.index(client_id)
         client = get_client_instance(client_id)
-        # device, train_data, test_data = client_loaders[client_id]
-        # client = Client(i, device, train_data, test_data, net=get_client_model(device),
-        #                 learning_rate=args.eta, local_epochs=args.epochs,
-        #                 target_sparsity=args.sparsity, classes=dataset_classes[args.dataset], global_args=args, curr_epoch=client_epochs[client_id])
         # Local client training.
         t0 = time.process_time()
 

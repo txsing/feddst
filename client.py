@@ -117,8 +117,9 @@ class Client:
                 running_loss += loss.item()
 
             if (self.curr_epoch - self.global_args.pruning_begin) % self.global_args.pruning_interval == 0 and readjust:
-                prune_sparsity = sparsity + (1 - sparsity) * self.global_args.readjustment_ratio
+                prune_sparsity = sparsity + (1 - sparsity) * readjustment_ratio
                 # recompute gradient if we used FedProx penalty
+                print(f"Client-{self.id} start-pruning, sparsity: {prune_sparsity}, epoch: {self.curr_epoch}")
                 self.optimizer.zero_grad()
                 outputs = self.net(inputs)
                 self.criterion(outputs, labels).backward()
