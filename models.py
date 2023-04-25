@@ -168,6 +168,7 @@ class PrunableNet(nn.Module):
                 n_prune = int(n_total - weights_by_layer[name])
                 if n_prune >= n_total or n_prune < 0:
                     continue
+                print('Prune (total)', name, n_prune)
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
                         continue
@@ -241,7 +242,7 @@ class PrunableNet(nn.Module):
                 n_grow = int(weights_by_layer[name] - n_nonzero) # 期望的非0参数的个数
                 if n_grow < 0:
                     continue
-                print('Grow (total)', n_grow)
+                print('Grow (total)', name, n_grow)
 
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
