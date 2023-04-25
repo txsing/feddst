@@ -73,7 +73,7 @@ args = parser.parse_args()
 flog = open(args.outfile+'.log', 'a')
 fcsv = open(args.outfile+'.csv', 'a')
 
-devices = [torch.device(x) for x in args.device] if torch.cuda.is_available() else ['cpu']
+devices = [torch.device(x) for x in args.device] if torch.cuda.is_available() else [torch.device('cpu')]
 args.pid = os.getpid()
 
 if args.rate_decay_end is None:
@@ -177,7 +177,6 @@ if args.drill:
 
 print('Fetching dataset...')
 print_to_log(args)
-cache_devices = devices
 
 '''
 if os.path.isfile(args.dataset + '.pickle'):
@@ -192,7 +191,7 @@ else:
 '''
 
 loaders = get_dataset(args.dataset, clients=args.total_clients, mode=args.distribution,
-                      beta=args.beta, batch_size=args.batch_size, devices=cache_devices,
+                      beta=args.beta, batch_size=args.batch_size, devices=devices,
                       min_samples=args.min_samples, samples=args.samples_per_client)
 
 # initialize clients
@@ -224,7 +223,7 @@ for i, (client_id, cl_loaders) in enumerate(clients_loaders_map):
     torch.cuda.empty_cache()
 
 # initialize global model
-global_model = all_models[args.dataset](device='cpu', classes=dataset_classes[args.dataset])
+global_model = all_models[args.dataset](device=devices[0], classes=dataset_classes[args.dataset])
 initialize_mask(global_model)
 
 global_model.layer_prune(sparsity=args.sparsity, sparsity_distribution=args.sparsity_distribution)
@@ -253,13 +252,13 @@ dataset_classes = {
 }
 
 client_temp_models = {}
-for device in cache_devices:
-    device_idx = 'cpu' if device.type == 'cpu' else str(device.index)
+for device in devices:
+    device_idx = devices[0] if device.type == devices[0] else str(device.index)
     client_temp_model = all_models[args.dataset](device=device, classes=dataset_classes[args.dataset]).to(device)
     client_temp_models[device_idx] = client_temp_model
 
 def get_client_model(device):
-    device_idx = 'cpu' if device.type == 'cpu' else str(device.index)
+    device_idx = devices[0] if device.type == devices[0] else str(device.index)
     return client_temp_models[device_idx]
 
 def get_client_instance(client_id):
@@ -283,10 +282,10 @@ for server_round in range(args.rounds): # 默认 400
     for key, val in global_state.items():
         if key.endswith('_mask'):
             continue
-        aggregated_weight_params[key] = torch.zeros_like(val, dtype=torch.float, device='cpu')
-        aggregated_weight_params_needmsk[key] = torch.zeros_like(val, dtype=torch.float, device='cpu')
+        aggregated_weight_params[key] = torch.zeros_like(val, dtype=torch.float, device=devices[0])
+        aggregated_weight_params_needmsk[key] = torch.zeros_like(val, dtype=torch.float, device=devices[0])
         if needs_mask(key): # weight 都需要 mask， bias 不需要。
-            aggregated_mask_params[key] = torch.zeros_like(val, device='cpu')
+            aggregated_mask_params[key] = torch.zeros_like(val, device=devices[0])
 
     # for each client k \in S_t in parallel do
     total_sampled = 0
@@ -318,7 +317,6 @@ for server_round in range(args.rounds): # 默认 400
         train_result = client.train(global_params=global_state, initial_global_params=initial_global_state,
                                     readjustment_ratio=readjustment_ratio,
                                     readjust=readjust, sparsity=round_sparsity, global_params_direction=global_params_direction)
-
         print_to_log(f'R-{server_round}: Client-{client_id} S.S:{round_sparsity}; C.S:{client.sparsity()}; ReAdjust:{readjustment_ratio}')
         client_epochs[client_id] = client_epochs[client_id] + 1
         client_state = train_result['state'] # with mask_name
@@ -342,10 +340,10 @@ for server_round in range(args.rounds): # 默认 400
                 name = key[:-5]
             elif key.endswith('_mask'):
                 name = key[:-5]
-                cl_mask_params_needmsk[name] = cl_val.to(device='cpu', copy=True)
+                cl_mask_params_needmsk[name] = cl_val.to(device=devices[0], copy=True)
                 continue
 
-            cl_weight_all_params[key] = cl_val.to(device='cpu', copy=True)
+            cl_weight_all_params[key] = cl_val.to(device=devices[0], copy=True)
             if args.fp16:
                 cl_weight_all_params[key] = cl_weight_all_params[key].to(torch.bfloat16).to(torch.float)
 
@@ -359,7 +357,7 @@ for server_round in range(args.rounds): # 默认 400
             if name in cl_mask_params_needmsk:
                 # things like weights have masks
                 cl_mask = cl_mask_params_needmsk[name]
-                sv_mask = global_state[name+'_mask'].to('cpu', copy=True)
+                sv_mask = global_state[name+'_mask'].to(devices[0], copy=True)
 
                 # calculate Hamming distance of masks for debugging
                 # if readjust:
@@ -370,7 +368,7 @@ for server_round in range(args.rounds): # 默认 400
 
                 if args.remember_old: # By default, this is False.
                     sv_mask[cl_mask] = 0
-                    sv_param = global_state[name].to('cpu', copy=True)
+                    sv_param = global_state[name].to(devices[0], copy=True)
                     # remember_old 为 True 的时候，aggregated_params_for_mask 才会与 aggregated_weight_params 在 weight 上的值不同。
                     # 加上 server 的 weight 值，但是最后 global_model inference 时并没有用到，只是用于重新计算 server mask
                     aggregated_weight_params_needmsk[name].add_(client.train_size() * sv_param) #* sv_mask)
@@ -467,7 +465,7 @@ for server_round in range(args.rounds): # 默认 400
                            compute_time=compute_times[i],
                            download_cost=download_cost[i],
                            upload_cost=upload_cost[i],
-                           accuracy=accuracies[client_id],
+                           accuracy=accuracies[client_id].item(),
                            global_acc=global_acc.item())
 
     global_acc = evaluate_global_model(global_model, loaders)
