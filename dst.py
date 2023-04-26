@@ -71,6 +71,7 @@ parser.add_argument('-o', '--outfile', default='output', type=str)
 
 args = parser.parse_args()
 flog = open(args.outfile+'.log', 'a')
+args.log_file = flog
 fcsv = open(args.outfile+'.csv', 'a')
 
 devices = [torch.device(x) for x in args.device] if torch.cuda.is_available() else [torch.device('cpu')]
@@ -84,6 +85,7 @@ if args.sparsity <= 0 :
     args.readjustment_ratio = 0
 
 args.use_DG_dataset = args.dataset in ['pacs', 'officehome', 'vlcs']
+
 
 def print_to_log(*arg, **kwargs):
     print(*arg, **kwargs, file=flog)

@@ -11,7 +11,7 @@ import warnings
 from torch.utils import model_zoo
 from torchvision.models.resnet import BasicBlock, model_urls, Bottleneck
 from collections import OrderedDict
-
+import math
 
 # Utility functions
 def needs_mask(name):
@@ -167,8 +167,8 @@ class PrunableNet(nn.Module):
                     n_total += buf.numel()
                 # DEBUG: sometimes the n_prune_tmp is NaN
                 n_prune_tmp = n_total - weights_by_layer[name]
-                if not n_prune_tmp:
-                    print('Weird Error: ', name, n_total, weights_by_layer[name])
+                if math.isnan(n_prune_tmp):
+                    print('Weird Error: ', name, n_total, weights_by_layer[name], n_prune_tmp)
                     n_prune = 0
                 n_prune = int(n_prune_tmp)
                 if n_prune >= n_total or n_prune < 0:

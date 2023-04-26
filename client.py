@@ -4,6 +4,9 @@ import torch.nn as nn
 import models
 from models import all_models, needs_mask, initialize_mask
 
+def print_to_log(*arg, log_file=None, **kwargs):
+    print(*arg, file=log_file, **kwargs)
+    print(*arg, **kwargs)
 
 class Client:
 
@@ -98,7 +101,7 @@ class Client:
 
             for i, (inputs, labels) in enumerate(self.train_data):
                 if self.global_args.drill and i >= 3:
-                    print('drill training', self.id)
+                    print_to_log(f'drill training: Client-{self.id}', log_file=self.global_args.log_file)
                     break
                 inputs = inputs.to(self.device)
                 labels = labels.to(self.device)
@@ -119,7 +122,8 @@ class Client:
             if (self.curr_epoch - self.global_args.pruning_begin) % self.global_args.pruning_interval == 0 and readjust:
                 prune_sparsity = sparsity + (1 - sparsity) * readjustment_ratio
                 # recompute gradient if we used FedProx penalty
-                print(f"Client-{self.id} start-pruning, sparsity: {prune_sparsity}, epoch: {self.curr_epoch}")
+                print_to_log(f"Client-{self.id} start-pruning, sparsity: {prune_sparsity}, epoch: {self.curr_epoch}", 
+                             log_file=self.global_args.log_file)
                 self.optimizer.zero_grad()
                 outputs = self.net(inputs)
                 self.criterion(outputs, labels).backward()
