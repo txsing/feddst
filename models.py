@@ -165,7 +165,12 @@ class PrunableNet(nn.Module):
                 n_total = 0
                 for bname, buf in layer.named_buffers():
                     n_total += buf.numel()
-                n_prune = int(n_total - weights_by_layer[name])
+                # DEBUG: sometimes the n_prune_tmp is NaN
+                n_prune_tmp = n_total - weights_by_layer[name]
+                if not n_prune_tmp:
+                    print('Weird Error: ', name, n_total, weights_by_layer[name])
+                    n_prune = 0
+                n_prune = int(n_prune_tmp)
                 if n_prune >= n_total or n_prune < 0:
                     continue
                 print('Prune (total)', name, n_prune)

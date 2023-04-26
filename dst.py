@@ -53,7 +53,7 @@ parser.add_argument('--drill', default=False, action='store_true', help="drill r
 parser.add_argument('--sparsity-distribution', default='erk', choices=('uniform', 'er', 'erk'))
 parser.add_argument('--final-sparsity', type=float, default=None, help='final sparsity to grow to, from 0 to 1. default is the same as --sparsity')
 
-parser.add_argument('--batch-size', type=int, default=32,
+parser.add_argument('-B', '--batch-size', type=int, default=32,
                     help='local client batch size')
 parser.add_argument('--l2', default=0.001, type=float, help='L2 regularization strength')
 parser.add_argument('--momentum', default=0.9, type=float, help='Local client SGD momentum parameter')
