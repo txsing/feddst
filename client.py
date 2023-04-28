@@ -118,7 +118,8 @@ class Client:
                 # if i % 10 == 0:
                 #     print(f"iteration: {i}, loss: {loss.item()}")
                 running_loss += loss.item()
-
+            if readjust:
+                print('client-'+str(self.id), self.curr_epoch)
             if self.curr_epoch >= self.global_args.pruning_begin and (self.curr_epoch - self.global_args.pruning_begin) % self.global_args.pruning_interval == 0 and readjust:
                 prune_sparsity = sparsity + (1 - sparsity) * readjustment_ratio
                 # recompute gradient if we used FedProx penalty

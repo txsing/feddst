@@ -14,7 +14,6 @@ from datasets import get_dataset
 from client import Client
 from models import all_models, needs_mask, initialize_mask
 
-rng = np.random.default_rng()
 
 def device_list(x):
     if x == 'cpu':
@@ -70,6 +69,17 @@ parser.add_argument('-o', '--outfile', default='output', type=str)
 
 
 args = parser.parse_args()
+
+args.seed = 0
+
+seed_val = args.seed
+torch.manual_seed(seed_val)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+np.random.seed(seed_val)
+
+rng = np.random.default_rng()
+
 flog = open(args.outfile+'.log', 'a')
 args.log_file = flog
 fcsv = open(args.outfile+'.csv', 'a')
@@ -93,7 +103,7 @@ def print_to_log(*arg, **kwargs):
 
 def print_to_csv(*arg, **kwargs):
     print(*arg, **kwargs, file=fcsv)
-    print(*arg, **kwargs)
+    # print(*arg, **kwargs)
 
 def print_csv_line(**kwargs):
     print_to_csv(','.join(str(x) for x in kwargs.values()))
@@ -225,7 +235,7 @@ for i, (client_id, cl_loaders) in enumerate(clients_loaders_map):
     torch.cuda.empty_cache()
 
 # initialize global model
-global_model = all_models[args.dataset](device=devices[0], classes=dataset_classes[args.dataset])
+global_model = all_models[args.dataset](device=devices[0], classes=dataset_classes[args.dataset], global_args=args)
 initialize_mask(global_model)
 
 global_model.layer_prune(sparsity=args.sparsity, sparsity_distribution=args.sparsity_distribution)
@@ -256,7 +266,7 @@ dataset_classes = {
 client_temp_models = {}
 for device in devices:
     device_idx = devices[0] if device.type == devices[0] else str(device.index)
-    client_temp_model = all_models[args.dataset](device=device, classes=dataset_classes[args.dataset]).to(device)
+    client_temp_model = all_models[args.dataset](device=device, classes=dataset_classes[args.dataset], global_args=args).to(device)
     client_temp_models[device_idx] = client_temp_model
 
 def get_client_model(device):
@@ -264,8 +274,8 @@ def get_client_model(device):
     return client_temp_models[device_idx]
 
 def get_client_instance(client_id):
-    device, train_data, test_data = client_loaders[client_id]
-    client = Client(i, device, train_data, test_data, net=get_client_model(device),
+    cl_device, train_data, test_data = client_loaders[client_id]
+    client = Client(i, cl_device, train_data, test_data, net=get_client_model(cl_device),
                     learning_rate=args.lr, local_epochs=args.epochs,
                     target_sparsity=args.sparsity, classes=dataset_classes[args.dataset], global_args=args, curr_epoch=client_epochs[client_id])
     return client
@@ -289,32 +299,31 @@ for server_round in range(args.rounds): # 默认 400
         if needs_mask(key): # weight 都需要 mask， bias 不需要。
             aggregated_mask_params[key] = torch.zeros_like(val, device=devices[0])
 
-    # for each client k \in S_t in parallel do
-    total_sampled = 0
+    # for each client k \in S_t in parallel do    
+    if args.rate_decay_method == 'cosine':
+        readjustment_ratio = args.readjustment_ratio * global_model._decay(server_round, alpha=args.readjustment_ratio, t_end=args.rate_decay_end)
+    else:
+        readjustment_ratio = args.readjustment_ratio
+    readjust = (server_round - 1) % args.rounds_between_readjustments == 0 and readjustment_ratio > 0. # bool 值
+    # determine sparsity desired at the end of this round
+    # ...via linear interpolation
+    if server_round <= args.rate_decay_end:
+        round_sparsity = args.sparsity * (args.rate_decay_end - server_round) / args.rate_decay_end + args.final_sparsity * server_round / args.rate_decay_end
+    else:
+        round_sparsity = args.final_sparsity
+    if readjust:
+        print_to_log(f'R-{server_round}: S.S:{round_sparsity}; ReAdjust:{readjustment_ratio}')
+    
     for client_id in client_indices:
         i = client_ids.index(client_id)
         client = get_client_instance(client_id)
         # Local client training.
         t0 = time.process_time()
 
-        if args.rate_decay_method == 'cosine':
-            readjustment_ratio = args.readjustment_ratio * global_model._decay(server_round, alpha=args.readjustment_ratio, t_end=args.rate_decay_end)
-        else:
-            readjustment_ratio = args.readjustment_ratio
-
-        readjust = (server_round - 1) % args.rounds_between_readjustments == 0 and readjustment_ratio > 0. # bool 值
-        # determine sparsity desired at the end of this round
-        # ...via linear interpolation
-        if server_round <= args.rate_decay_end:
-            round_sparsity = args.sparsity * (args.rate_decay_end - server_round) / args.rate_decay_end + args.final_sparsity * server_round / args.rate_decay_end
-        else:
-            round_sparsity = args.final_sparsity
-
         # actually perform training
         train_result = client.train(global_params=global_state, initial_global_params=initial_global_state,
                                     readjustment_ratio=readjustment_ratio,
                                     readjust=readjust, sparsity=round_sparsity, global_params_direction=global_params_direction)
-        print_to_log(f'R-{server_round}: Client-{client_id} S.S:{round_sparsity}; C.S:{client.sparsity()}; ReAdjust:{readjustment_ratio}')
         client_epochs[client_id] = client_epochs[client_id] + 1
         client_state = train_result['state'] # with mask_name
 
@@ -427,7 +436,7 @@ for server_round in range(args.rounds): # 默认 400
 
     for name, mask in aggregated_mask_params.items():
         delta_weight = global_state[name] - global_state_pre_rd[name]
-        global_params_direction[name] = torch.sign(delta_weight)
+        global_params_direction[name] = torch.sign(delta_weight).to(devices[0])
 
         new_mask = global_state[name+'_mask']
         aggregated_state[name+'_mask'] = new_mask

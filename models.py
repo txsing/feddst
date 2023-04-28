@@ -13,6 +13,10 @@ from torchvision.models.resnet import BasicBlock, model_urls, Bottleneck
 from collections import OrderedDict
 import math
 
+def print_to_log(*arg, log_file=None, **kwargs):
+    print(*arg, file=log_file, **kwargs)
+    print(*arg, **kwargs)
+
 # Utility functions
 def needs_mask(name):
     return (name.endswith('weight')) and ('bn' not in name)
@@ -49,10 +53,10 @@ class PrunableNet(nn.Module):
         return moudles
 
 
-    def __init__(self, device='cpu'):
+    def __init__(self, device='cpu', global_args=None):
         super(PrunableNet, self).__init__()
         self.device = device
-
+        self.global_args = global_args
         self.communication_sparsity = 0
 
 
@@ -168,12 +172,12 @@ class PrunableNet(nn.Module):
                 # DEBUG: sometimes the n_prune_tmp is NaN
                 n_prune_tmp = n_total - weights_by_layer[name]
                 if math.isnan(n_prune_tmp):
-                    print('Weird Error: ', name, n_total, weights_by_layer[name], n_prune_tmp)
+                    print_to_log(f'Weird Error: {name},{n_total},{weights_by_layer[name]},{n_prune_tmp}', log_file=self.global_args.log_file)
                     n_prune = 0
                 n_prune = int(n_prune_tmp)
                 if n_prune >= n_total or n_prune < 0:
                     continue
-                print('Prune (total)', name, n_prune)
+                print_to_log(f'Prune (total): {name}, {n_prune}', log_file=self.global_args.log_file)
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
                         continue
@@ -198,12 +202,12 @@ class PrunableNet(nn.Module):
                     if len(same_directions) > 0:
                         diff_directions_count = torch.sum(~same_directions)
                         n_prune_dir = int(dire_ratio * n_prune)
-                        
                         n_prune_dir = min(n_prune_dir, diff_directions_count)
                         n_prune_weight = n_prune - n_prune_dir
-                        paradata_tmp = torch.abs(param.data.flatten())
-                        paradata_tmp[same_directions] = 999999
-                        _, prune_indices_dir = torch.topk(paradata_tmp, n_prune_dir, largest=False)
+                        if n_prune_dir > 0:
+                            paradata_tmp = torch.abs(param.data.flatten())
+                            paradata_tmp[same_directions] = 999999
+                            _, prune_indices_dir = torch.topk(paradata_tmp, n_prune_dir, largest=False)
 
                     prune_indices_weight = None
                     if prune_indices_dir is not None:
@@ -273,10 +277,10 @@ class PrunableNet(nn.Module):
                         same_directions_count = torch.sum(same_directions)
                         n_grow_dir = min(int(dire_ratio * n_grow), same_directions_count)
                         n_grow_grad = n_grow - n_grow_dir
-
-                        para_grad_tmp = torch.abs(param.grad.flatten())
-                        para_grad_tmp[~same_directions] = -1.0
-                        _, grow_indices_dir = torch.topk(para_grad_tmp, n_grow_dir, largest=True)
+                        if n_grow_dir > 0:
+                            para_grad_tmp = torch.abs(param.grad.flatten())
+                            para_grad_tmp[~same_directions] = -1.0
+                            _, grow_indices_dir = torch.topk(para_grad_tmp, n_grow_dir, largest=True)
 
                     grow_indices_grad = None
                     if grow_indices_dir is not None:
