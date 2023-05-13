@@ -11,47 +11,52 @@ import warnings
 from torch.utils import model_zoo
 from torchvision.models.resnet import BasicBlock, model_urls, Bottleneck
 from collections import OrderedDict
+import math
 
+def print_to_log(*arg, log_file=None, **kwargs):
+    print(*arg, file=log_file, **kwargs)
+    print(*arg, **kwargs)
 
 # Utility functions
-def encode_buffer_name(name):
-    return name.replace('.', '@')
-
-def decode_buffer_name(name):
-    return name.replace('@', '.')
-
 def needs_mask(name):
-    return name.endswith('weight')
+    return (name.endswith('weight')) and ('bn' not in name)
 
 
 def initialize_mask(model, dtype=torch.bool):
-    layers_to_prune = (layer for _, layer in model.named_children())
-    for layer in layers_to_prune:
+    layers_to_prune = ((layername, layer) for layername, layer in model.leaf_modules())
+    for layername, layer in layers_to_prune:
         for name, param in layer.named_parameters():
-            if name.endswith('weight'):
-                if hasattr(layer, name + '_mask'):
-                    warnings.warn(
-                        'Parameter has a pruning mask already. '
-                        'Reinitialize to an all-one mask.'
-                    )
-                bname = encode_buffer_name(name)+'_mask'
-                layer.register_buffer(bname, torch.ones_like(param, dtype=dtype))
+            if not needs_mask(layername + '.' +name):
                 continue
-                parent = name[:name.rfind('.')]
-
-                for mname, module in layer.named_modules():
-                    if mname != parent:
-                        continue
-                    module.register_buffer(name[name.rfind('.')+1:] + '_mask', torch.ones_like(param, dtype=dtype))
-
+            if hasattr(layer, layername + '.' +name + '_mask'):
+                warnings.warn(
+                    'Parameter has a pruning mask already. '
+                    'Reinitialize to an all-one mask.'
+                )
+            bname = name + '_mask'
+            # register_buffer 是用来在模块中添加一个不是模型参数的缓冲区的方法。
+            # 这通常用于注册一些不需要通过梯度更新的缓冲区，但是又是模型状态的一部分，比如 BatchNorm 的 running_mean。
+            # 注册缓冲区的好处是，当你保存或者移动模型时，缓冲区也会跟着保存或者移动。
+            # 注册缓冲区的方法是在模块上调用 register_buffer 方法，传入一个名字和一个初始值。
+            # 比如说：pytorch 中 BN 层的 running_mean 和 running_var 是注册在模块中的缓冲区，而不是模型参数。
+            layer.register_buffer(bname, torch.ones_like(param, dtype=dtype))
 
 class PrunableNet(nn.Module):
     '''Common functionality for all networks in this experiment.'''
 
-    def __init__(self, device='cpu'):
+    def leaf_modules(self):
+        moudles = []
+        for name, md in self.named_modules():
+            l =  (list(md.modules()))
+            if len(l) == 1:
+                moudles.append((name, md))
+        return moudles
+
+
+    def __init__(self, device='cpu', global_args=None):
         super(PrunableNet, self).__init__()
         self.device = device
-
+        self.global_args = global_args
         self.communication_sparsity = 0
 
 
@@ -59,7 +64,7 @@ class PrunableNet(nn.Module):
         # bits required to transmit mask and parameters?
         self.mask_size = 0
         self.param_size = 0
-        for _, layer in self.named_children():
+        for _, layer in self.leaf_modules():
             for name, param in layer.named_parameters():
                 param_size = np.prod(param.size())
                 self.param_size += param_size * 32 # FIXME: param.dtype.size?
@@ -71,16 +76,15 @@ class PrunableNet(nn.Module):
 
 
     def clear_gradients(self):
-        for _, layer in self.named_children():
-            for _, param in layer.named_parameters():
-                del param.grad
+        for _, param in self.named_parameters():
+            del param.grad
         torch.cuda.empty_cache()
 
 
     def infer_mask(self, masking):
         for name, param in self.state_dict().items():
             if needs_mask(name) and name in masking.masks:
-                mask_name = name + "_mask"
+                mask_name = name + '_mask'
                 mask = self.state_dict()[mask_name]
                 mask.copy_(masking.masks[name])
 
@@ -102,13 +106,14 @@ class PrunableNet(nn.Module):
     def _weights_by_layer(self, sparsity=0.1, sparsity_distribution='erk'):
         with torch.no_grad():
             layer_names = []
-            sparsities = np.empty(len(list(self.named_children()))) # 3层layers => sparsities: [S1, S2, S3] 
+            sparsities = np.empty(len(list(self.leaf_modules()))) # 3层layers => sparsities: [S1, S2, S3] 
             # sparsities = []
             n_weights = np.zeros_like(sparsities, dtype=int)
 
-            for i, (name, layer) in enumerate(self.named_children()):
+            for i, (name, layer) in enumerate(self.leaf_modules()):
                 layer_names.append(name)
                 kernel_size = None
+
                 if isinstance(layer, nn.modules.conv._ConvNd):
                     neur_out = layer.out_channels
                     neur_in = layer.in_channels
@@ -116,6 +121,8 @@ class PrunableNet(nn.Module):
                 elif isinstance(layer, nn.Linear):
                     neur_out = layer.out_features
                     neur_in = layer.in_features
+                elif isinstance(layer, nn.modules.container.Sequential):
+                    neur_in, neur_out = self.layer_channels[name]
                 else:
                     continue
 
@@ -124,20 +131,7 @@ class PrunableNet(nn.Module):
 
                 if sparsity_distribution == 'uniform':
                     sparsities[i] = sparsity
-                    # sparsities.append(sparsity)
                     continue
-
-                # kernel_size = None
-                # if isinstance(layer, nn.modules.conv._ConvNd):
-                #     neur_out = layer.out_channels
-                #     neur_in = layer.in_channels
-                #     kernel_size = layer.kernel_size
-                # elif isinstance(layer, nn.Linear):
-                #     neur_out = layer.out_features
-                #     neur_in = layer.in_features
-                # else:
-                #     raise ValueError('Unsupported layer type ' + str(type(layer)))
-
                 if sparsity_distribution == 'er':
                     sparsities[i] = 1 - (neur_in + neur_out) / (neur_in * neur_out)
                 elif sparsity_distribution == 'erk':
@@ -157,7 +151,7 @@ class PrunableNet(nn.Module):
             return ret
 
 
-    def layer_prune(self, sparsity=0.1, sparsity_distribution='erk'):
+    def layer_prune(self, sparsity=0.1, sparsity_distribution='erk', dire_ratio = 0.1, global_directions={}):
         '''
         Prune the network to the desired sparsity, following the specified
         sparsity distribution. The weight magnitude is used for pruning.
@@ -170,34 +164,71 @@ class PrunableNet(nn.Module):
         #print('desired sparsity', sparsity)
         with torch.no_grad():
             weights_by_layer = self._weights_by_layer(sparsity=sparsity, sparsity_distribution=sparsity_distribution)
-            for name, layer in self.named_children():
-
+            for name, layer in self.leaf_modules():
                 # We need to figure out how many to prune
                 n_total = 0
                 for bname, buf in layer.named_buffers():
                     n_total += buf.numel()
-                n_prune = int(n_total - weights_by_layer[name])
+                # DEBUG: sometimes the n_prune_tmp is NaN
+                n_prune_tmp = n_total - weights_by_layer[name]
+                if math.isnan(n_prune_tmp):
+                    print_to_log(f'Weird Error: {name},{n_total},{weights_by_layer[name]},{n_prune_tmp}', log_file=self.global_args.log_file)
+                    n_prune = 0
+                n_prune = int(n_prune_tmp)
                 if n_prune >= n_total or n_prune < 0:
                     continue
-                #print('prune out', n_prune)
-
+                print_to_log(f'Prune (total): {name}, {n_prune}', log_file=self.global_args.log_file)
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
                         continue
 
                     # Determine smallest indices
-                    _, prune_indices = torch.topk(torch.abs(param.data.flatten()),
-                                                  n_prune, largest=False)
+                    if dire_ratio <= 0.0:
+                        _, prune_indices = torch.topk(torch.abs(param.data.flatten()), n_prune, largest=False)
+                        param.data.view(param.data.numel())[prune_indices] = 0
+                        for bname, buf in layer.named_buffers():
+                            if bname == pname + '_mask':
+                                buf.view(buf.numel())[prune_indices] = 0
+                        continue
 
-                    # Write and apply mask
+                    same_directions = []
+                    if param.grad is not None and len(global_directions) > 0:
+                        grad_direction = torch.sign(param.grad.flatten())
+                        x = global_directions[name+'.'+pname].flatten().to(self.device)
+                        same_directions = (grad_direction == x)
+
+                    n_prune_weight, n_prune_dir = n_prune, 0
+                    prune_indices_dir = None
+                    if len(same_directions) > 0:
+                        diff_directions_count = torch.sum(~same_directions)
+                        n_prune_dir = int(dire_ratio * n_prune)
+                        n_prune_dir = min(n_prune_dir, diff_directions_count)
+                        n_prune_weight = n_prune - n_prune_dir
+                        if n_prune_dir > 0:
+                            paradata_tmp = torch.abs(param.data.flatten())
+                            paradata_tmp[same_directions] = 999999
+                            _, prune_indices_dir = torch.topk(paradata_tmp, n_prune_dir, largest=False)
+
+                    prune_indices_weight = None
+                    if prune_indices_dir is not None:
+                        paradata_tmp = torch.abs(param.data.flatten())
+                        paradata_tmp[prune_indices_dir] == 999999
+                        _, prune_indices_weight = torch.topk(paradata_tmp, n_prune_weight, largest=False)
+
+                    if prune_indices_weight is not None:
+                        print('Prune-out (dir, w)', len(prune_indices_dir), len(prune_indices_weight))
+                        prune_indices = torch.cat((prune_indices_dir, prune_indices_weight))
+                    else:
+                        _, prune_indices = torch.topk(torch.abs(param.data.flatten()), n_prune, largest=False)
+
                     param.data.view(param.data.numel())[prune_indices] = 0
                     for bname, buf in layer.named_buffers():
-                        if bname == decode_buffer_name(pname) + '_mask':
+                        if bname == pname + '_mask':
                             buf.view(buf.numel())[prune_indices] = 0
             #print('pruned sparsity', self.sparsity())
 
 
-    def layer_grow(self, sparsity=0.1, sparsity_distribution='erk'):
+    def layer_grow(self, sparsity=0.1, sparsity_distribution='erk', dire_ratio = 0.1, global_directions={}):
         '''
         Grow the network to the desired sparsity, following the specified
         sparsity distribution.
@@ -211,7 +242,7 @@ class PrunableNet(nn.Module):
         #print('desired sparsity', sparsity)
         with torch.no_grad():
             weights_by_layer = self._weights_by_layer(sparsity=sparsity, sparsity_distribution=sparsity_distribution)
-            for name, layer in self.named_children():
+            for name, layer in self.leaf_modules():
 
                 # We need to figure out how many to grow
                 n_nonzero = 0
@@ -220,20 +251,53 @@ class PrunableNet(nn.Module):
                 n_grow = int(weights_by_layer[name] - n_nonzero) # 期望的非0参数的个数
                 if n_grow < 0:
                     continue
-                #print('grow from', n_nonzero, 'to', weights_by_layer[name])
+                print('Grow (total)', name, n_grow)
 
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
                         continue
 
-                    # Determine largest gradient indices
-                    _, grow_indices = torch.topk(torch.abs(param.grad.flatten()),
-                                                 n_grow, largest=True)
+                    # Determine smallest indices
+                    if dire_ratio <= 0.0:
+                        _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)
+                        param.data.view(param.data.numel())[grow_indices] = 0
+                        for bname, buf in layer.named_buffers():
+                            if bname == pname + '_mask':
+                                buf.view(buf.numel())[grow_indices] = 1
+                        continue
+
+                    same_directions = []
+                    if param.grad is not None and len(global_directions) > 0:
+                        grad_direction = torch.sign(param.grad.flatten())
+                        x = global_directions[name+'.'+pname].flatten().to(self.device)
+                        same_directions = (grad_direction == x)
+
+                    n_grow_grad, n_grow_dir, grow_indices_dir = n_grow, 0, None
+                    if len(same_directions) > 0:
+                        same_directions_count = torch.sum(same_directions)
+                        n_grow_dir = min(int(dire_ratio * n_grow), same_directions_count)
+                        n_grow_grad = n_grow - n_grow_dir
+                        if n_grow_dir > 0:
+                            para_grad_tmp = torch.abs(param.grad.flatten())
+                            para_grad_tmp[~same_directions] = -1.0
+                            _, grow_indices_dir = torch.topk(para_grad_tmp, n_grow_dir, largest=True)
+
+                    grow_indices_grad = None
+                    if grow_indices_dir is not None:
+                        para_grad_tmp = torch.abs(param.grad.flatten())
+                        para_grad_tmp[grow_indices_dir] == -1.0
+                        _, grow_indices_grad = torch.topk(para_grad_tmp, n_grow_grad, largest=True)
+
+                    if grow_indices_grad is not None:
+                        print('Grow (dir, grad)', len(grow_indices_dir), len(grow_indices_grad))
+                        grow_indices = torch.cat((grow_indices_dir, grow_indices_grad))
+                    else:
+                        _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)
 
                     # Write and apply mask
                     param.data.view(param.data.numel())[grow_indices] = 0
                     for bname, buf in layer.named_buffers():
-                        if bname == decode_buffer_name(pname) + '_mask':
+                        if bname == pname + '_mask':
                             buf.view(buf.numel())[grow_indices] = 1
             #print('grown sparsity', self.sparsity())
 
@@ -303,7 +367,7 @@ class PrunableNet(nn.Module):
         with torch.no_grad():
             # prune (self.pruning_rate) of the remaining weights
             parameters_to_prune = []
-            layers_to_prune = (layer for _, layer in self.named_children())
+            layers_to_prune = (layer for _, layer in self.leaf_modules())
             for layer in layers_to_prune:
                 for name, param in layer.named_parameters():
                     if needs_mask(name):
@@ -316,7 +380,7 @@ class PrunableNet(nn.Module):
                 amount=pruning_rate
             )
 
-
+    # Seems not get called at all.
     def grow(self, indices):
         with torch.no_grad():
             state = self.state_dict()
@@ -373,12 +437,9 @@ class PrunableNet(nn.Module):
                     # skip masks, since we will copy them with their corresponding
                     # layers, from the mask source.
                     continue
-
                 new_state[name] = local_state[name]
-
-                mask_name = name + '_mask'
-                if needs_mask(name) and mask_name in apply_mask_source:
-
+                if needs_mask(name) and (name + '_mask') in apply_mask_source:
+                    mask_name =  name + '_mask'
                     mask_to_apply = apply_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     mask_to_copy = copy_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     gpu_param = param[mask_to_apply].to(self.device)
@@ -394,7 +455,7 @@ class PrunableNet(nn.Module):
                     new_state[mask_name].copy_(mask_to_copy) # copy mask from mask_source into this model's mask
 
                     # what do we do with shadowed weights?
-                    if not keep_local_masked_weights:
+                    if not keep_local_masked_weights: # by default, keep_local_masked_weights is False, this if-clause will enter-in
                         new_state[name][~mask_to_apply] = 0
 
                     if mask_name not in local_state or not torch.equal(local_state[mask_name], mask_to_copy):
@@ -407,7 +468,6 @@ class PrunableNet(nn.Module):
                 # clean up copies made to gpu
                 if gpu_param.data_ptr() != param.data_ptr():
                     del gpu_param
-
             self.load_state_dict(new_state)
         return mask_changed
 
@@ -481,6 +541,7 @@ class PrunableNet(nn.Module):
         mask_size = 0
         for name, buf in buffers:
             if name.endswith('mask'):
+                # print(name, torch.sum(buf), buf.nelement())
                 n_ones += torch.sum(buf)
                 mask_size += buf.nelement()
 
@@ -493,7 +554,7 @@ class PrunableNet(nn.Module):
 
 class MNISTNet(PrunableNet):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, classes=10, *args, **kwargs):
         super(MNISTNet, self).__init__(*args, **kwargs)
 
         self.conv1 = nn.Conv2d(1, 10, 5) # "Conv 1-10"
@@ -516,7 +577,7 @@ class MNISTNet(PrunableNet):
 
 class CIFAR10Net(PrunableNet):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, classes=10, *args, **kwargs):
         super(CIFAR10Net, self).__init__(*args, **kwargs)
 
         self.conv1 = nn.Conv2d(3, 6, 5)
@@ -537,11 +598,9 @@ class CIFAR10Net(PrunableNet):
         x = F.relu(self.fc2(x))
         x = F.softmax(self.fc3(x), dim=1)
         return x
-
-
 class CIFAR100Net(PrunableNet):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, classes=100, *args, **kwargs):
         super(CIFAR100Net, self).__init__(*args, **kwargs)
 
         self.conv1 = nn.Conv2d(3, 6, 5)
@@ -612,9 +671,9 @@ class Conv2(PrunableNet):
 
 
 class ResNet(PrunableNet):
-    def __init__(self, block, layers, classes=7, num_channels=3, **kwargs):
+    def __init__(self, block, layers, *args, classes=7, num_channels=3, **kwargs):
         self.inplanes = 64
-        super(ResNet, self).__init__()
+        super(ResNet, self).__init__(*args,  **kwargs)
         self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=7, stride=2, padding=3,
                                bias=False)
         self.bn1 = nn.BatchNorm2d(64)
@@ -624,6 +683,10 @@ class ResNet(PrunableNet):
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2) # 
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+        self.layer_channels = {'layer1': (64, 64),
+                               'layer2': (64, 128),
+                               'layer3': (128, 256),
+                               'layer4': (256, 512)}
         self.avgpool = nn.AvgPool2d(7, stride=1)
         self.class_classifier = nn.Linear(512 * block.expansion, classes)
 
@@ -633,6 +696,7 @@ class ResNet(PrunableNet):
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+        self.init_param_sizes()
 
     # stride 参数决定了 该 Residual Layer 的第一个 block 的 stride，进而决定了这个layer 会不会缩减图片尺寸
     # res18 里只有第一个 Layer 不需要缩减，其他 Layer 都需要减半尺寸
@@ -674,41 +738,62 @@ class ResNet(PrunableNet):
         out = self.class_classifier(x)
         # layers_output_dict['fc']=out
         return out
-def resnet18(pretrained=True, **kwargs):
+
+def resnet18(pretrained=False, *args, **kwargs):
     """Constructs a ResNet-18 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
-    model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
+    model = ResNet(BasicBlock, [2, 2, 2, 2],*args, **kwargs)
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls['resnet18']), strict=False)
     return model
 
 
+
+
 class VggNet(PrunableNet):
-    def __init__(self, *args, classes=7, **kwargs):
+    def __init__(self, *args, classes=7, vgg_no='vgg11', **kwargs):
         super(VggNet, self).__init__(*args,  **kwargs)
+        self.vgg_no = vgg_no
         model = torchvision.models.vgg16(num_classes=classes)
-        self.feature_layer_names = ['conv1_1', 'relu1_1',
-             'conv1_2', 'relu1_2',
-             'pool1',
-             'conv2_1', 'relu2_1',
-             'conv2_2', 'relu2_2',
-             'pool2',
-             'conv3_1', 'relu3_1',
-             'conv3_2', 'relu3_2',
-             'conv3_3', 'relu3_3',
-             'pool3',
-             'conv4_1', 'relu4_1',
-             'conv4_2', 'relu4_2',
-             'conv4_3', 'relu4_3',
-             'pool4',
-             'conv5_1', 'relu5_1',
-             'conv5_2', 'relu5_2',
-             'conv5_3', 'relu5_3',
-             'pool5']
-        for idx in range(len(self.feature_layer_names)):
-            setattr(self, self.feature_layer_names[idx], model.features[idx])
+        
+        self.feature_layer_names = {
+            'vgg11': ['conv1_1', 'relu1_1',
+                      'conv1_2', 'relu1_2',
+                      'pool1',
+                      'conv2_1', 'relu2_1',
+                      'conv2_2', 'relu2_2',
+                      'pool2',
+                      'conv3_1', 'relu3_1',
+                      'conv3_2', 'relu3_2',
+                      'conv3_3', 'relu3_3',
+                      'pool3',
+                      'conv4_1', 'relu4_1',
+                      'conv4_2', 'relu4_2',
+                      ],
+            'vgg16': ['conv1_1', 'relu1_1',
+                   'conv1_2', 'relu1_2',
+                   'pool1',
+                   'conv2_1', 'relu2_1',
+                   'conv2_2', 'relu2_2',
+                   'pool2',
+                   'conv3_1', 'relu3_1',
+                   'conv3_2', 'relu3_2',
+                   'conv3_3', 'relu3_3',
+                   'pool3',
+                   'conv4_1', 'relu4_1',
+                   'conv4_2', 'relu4_2',
+                   'conv4_3', 'relu4_3',
+                   'pool4',
+                   'conv5_1', 'relu5_1',
+                   'conv5_2', 'relu5_2',
+                   'conv5_3', 'relu5_3',
+                   'pool5']
+             }
+        
+        for idx in range(len(self.feature_layer_names[vgg_no])):
+            setattr(self, self.feature_layer_names[vgg_no][idx], model.features[idx])
 
 
         # layers = collections.OrderedDict(zip(self.layer_names, model.features))
@@ -726,7 +811,7 @@ class VggNet(PrunableNet):
         self.init_param_sizes()
 
     def forward(self, x, **kwargs):
-        for layername in self.feature_layer_names:
+        for layername in self.feature_layer_names[self.vgg_no]:
             x = getattr(self, layername)(x)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
@@ -735,13 +820,24 @@ class VggNet(PrunableNet):
         # x = self.classifier(x)
         return  x
 
+def vgg11(pretrained=False, *args, **kwargs):
+    model = VggNet(*args, **kwargs, vgg_no='vgg11')
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['vgg11']), strict=False)
+    return model
+
+def vgg16(pretrained=False, *args, **kwargs):
+    model = VggNet(*args, **kwargs, vgg_no='vgg16')
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['vgg16']), strict=False)
+    return model
+
 all_models = {
         'mnist': MNISTNet,
-        # 'mnist': Conv2,
         'emnist': Conv2,
-        'cifar10': CIFAR10Net,
-        'cifar100': CIFAR100Net,
-        'pacs': VggNet,
+        'cifar10': vgg11,
+        'cifar100': vgg16,
+        'pacs': resnet18,
         'office': resnet18,
         'office-home': resnet18,
 }
