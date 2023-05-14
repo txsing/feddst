@@ -117,8 +117,11 @@ def distribute_clients_noniid(train, test, clients=100):
     '''Distribute a dataset according to a Dirichlet distribution.
     '''
     # Get indices for train and test sets
-    train_idx, cls_order = distribute_clients_categorical_follow_fedavg_way(train.targets, clients=clients, cls_order=None)
-    test_idx, _ = distribute_clients_categorical_follow_fedavg_way(test.targets, clients=clients, cls_order=cls_order)
+    train_labels = torch.Tensor(train.targets).int() if isinstance(train.targets, list) else train.targets
+    train_idx, cls_order = distribute_clients_categorical_follow_fedavg_way(train_labels, clients=clients, cls_order=None)
+    
+    test_labels = torch.Tensor(test.targets).int() if isinstance(test.targets, list) else test.targets
+    test_idx, _ = distribute_clients_categorical_follow_fedavg_way(test_labels, clients=clients, cls_order=cls_order)
     return train_idx, test_idx
 
 
