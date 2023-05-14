@@ -8,6 +8,7 @@ from os.path import join, dirname
 from random import sample
 from FLDataset import FLDataset
 from torchvision import transforms
+import random
 
 dataset_domains = {
     'vlcs': ["CALTECH", "LABELME", "PASCAL", "SUN"],
@@ -60,7 +61,64 @@ def distribute_clients_dirichlet(train, test, clients=400, batch_size=32, beta=0
     # Get indices for train and test sets
     train_idx, _, __ = distribute_clients_categorical(train, p, clients=clients, beta=beta)
     test_idx, _, __ = distribute_clients_categorical(test, p, clients=clients, beta=beta)
+    return train_idx, test_idx
 
+
+# Follow the non-iid way described in FedAvg paper
+# ```
+# where we first sort the data by digit label, divide it into 200 shards of size 300, and assign each of 100 clients 2 shards. This is a
+# pathological non-IID partition of the data, as most clients will only have examples of two digits.
+# ```
+def distribute_clients_categorical_follow_fedavg_way(labels, clients=100, cls_per_client=2, no_shards=200, cls_order=None):
+    sort_data_idx = torch.argsort(labels)
+
+    shard_size = int(len(labels) / no_shards)
+    shards_data_idx = torch.split(sort_data_idx, shard_size)
+    shards_per_client = int(no_shards / clients)
+
+    classes_size = len(torch.unique(labels))
+    if cls_order is None:
+        cls_order = []
+        M = int((clients * cls_per_client) / classes_size)
+        for i in range(M):
+            tmp_list = list(range(classes_size))
+            random.shuffle(tmp_list)
+            cls_order = cls_order+tmp_list
+
+    clients_shard_no = []
+    label_count = {}
+    for i in range(0, len(cls_order), cls_per_client):
+        cls_arr = cls_order[i:i+cls_per_client]
+        shard_no_cls = []
+        for cls1 in cls_arr:
+            if cls1 not in label_count.keys():
+                label_count[cls1] = 0
+            t = int(no_shards / (clients * cls_per_client) ) # how many shards per class per client
+            for j in range(t):
+                shard_no = cls1*int(no_shards/classes_size)+ label_count[cls1] + j
+                shard_no_cls.append(shard_no)
+            label_count[cls1] += t
+#         print(cls_arr, shard_no_cls)
+        clients_shard_no.append(shard_no_cls)
+
+    result = []
+    for client_idx in range(len(clients_shard_no)):
+        shard_no_arr = clients_shard_no[client_idx]
+        t = []
+        for shard_no in shard_no_arr:
+            t.append(shards_data_idx[shard_no])
+        client_data_idx = torch.cat(t,dim=0)
+        result.append(client_data_idx)
+
+    return result, cls_order
+
+
+def distribute_clients_noniid(train, test, clients=100):
+    '''Distribute a dataset according to a Dirichlet distribution.
+    '''
+    # Get indices for train and test sets
+    train_idx, cls_order = distribute_clients_categorical_follow_fedavg_way(train.targets, clients=clients, cls_order=None)
+    test_idx, _ = distribute_clients_categorical_follow_fedavg_way(test.targets, clients=clients, cls_order=cls_order)
     return train_idx, test_idx
 
 
@@ -125,7 +183,7 @@ def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=4
 
     rng = np.random.default_rng(rng)
 
-    if mode in ('dirichlet', 'iid'):
+    if mode in ('dirichlet', 'iid','noniid'):
         if dataset == 'mnist':
             xfrm = torchvision.transforms.Compose([
                 torchvision.transforms.ToTensor(),
@@ -153,6 +211,8 @@ def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=4
             train_idx, test_idx = distribute_clients_dirichlet(train, test, clients=clients, beta=beta)
         elif mode == 'iid':
             train_idx, test_idx = distribute_iid(train, test, clients=clients, samples_per_client=samples)
+        elif mode =='noniid':
+            train_idx, test_idx = distribute_clients_noniid(train, test, clients=clients)
 
     elif mode == 'lotteryfl':
         if dataset == 'mnist':

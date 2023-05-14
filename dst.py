@@ -30,7 +30,7 @@ parser.add_argument('--dataset', type=str, choices=('mnist', 'emnist', 'cifar10'
                     default='mnist', help='Dataset to use')
 parser.add_argument("--source", nargs='+', help='specified when using DG datasets')
 parser.add_argument("--target", nargs='+', help="Target")
-parser.add_argument('--distribution', type=str, choices=('dirichlet', 'lotteryfl', 'iid'), default='dirichlet',
+parser.add_argument('--distribution', type=str, choices=('dirichlet', 'lotteryfl', 'iid', 'noniid'), default='dirichlet',
                     help='how should the dataset be distributed?')
 parser.add_argument('--beta', type=float, default=0.1, help='Beta parameter (unbalance rate) for Dirichlet distribution')
 parser.add_argument('-K', '--total-clients', type=int, help='split the dataset between this many clients. Ignored for EMNIST.', default=400)
