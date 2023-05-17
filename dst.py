@@ -16,7 +16,7 @@ from models import all_models, needs_mask, initialize_mask
 
 
 def device_list(x):
-    if x == 'cpu':
+    if x == 'cpu' or x == 'mps':
         return [x]
     return [int(y) for y in x.split(',')]
 

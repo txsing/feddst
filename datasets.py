@@ -182,7 +182,8 @@ def get_mnist_or_cifar10(dataset='mnist', mode='dirichlet', path=None, clients=4
         raise ValueError(f'unsupported dataset {dataset}')
 
     if path is None:
-        path = os.path.join('..', 'data', dataset)
+        user_home_path = os.path.expanduser ('~')
+        path = os.path.join(user_home_path, 'Datasets', dataset)
 
     rng = np.random.default_rng(rng)
 
