@@ -2,7 +2,6 @@ sp=$1
 mu=$2
 dir=$3
 gpu=$4
-tag=$5
 r=0.5
 
 python dst.py \
@@ -16,5 +15,5 @@ python dst.py \
  --pruning-begin 9 --pruning-interval 10 \
  -d $dir \
  --prox ${mu} \
- -o ${tag}mnist-iid-K400C20-E10R400-prox${mu}-s${sp}r${r}-dir${dir} --device $gpu
+ -o mnist-${dist}-K400C20-E10R400-prox${mu}-s${sp}r${r}-dir${dir} --device $gpu
 
