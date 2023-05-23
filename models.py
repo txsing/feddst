@@ -9,8 +9,7 @@ import torchvision
 import prune as torch_prune
 import warnings
 from torch.utils import model_zoo
-from torchvision.models.resnet import BasicBlock, Bottleneck
-# from torchvision.models.resnet import BasicBlock, model_urls, Bottleneck
+from torchvision.models.resnet import BasicBlock, model_urls, Bottleneck
 from collections import OrderedDict
 import math
 
@@ -217,7 +216,7 @@ class PrunableNet(nn.Module):
                         _, prune_indices_weight = torch.topk(paradata_tmp, n_prune_weight, largest=False)
 
                     if prune_indices_weight is not None:
-                        print('Prune-out (dir, w)', len(prune_indices_dir), len(prune_indices_weight))
+                        print_to_log('Prune (WithDir, weight): ', len(prune_indices_dir), len(prune_indices_weight))
                         prune_indices = torch.cat((prune_indices_dir, prune_indices_weight))
                     else:
                         _, prune_indices = torch.topk(torch.abs(param.data.flatten()), n_prune, largest=False)
@@ -290,7 +289,7 @@ class PrunableNet(nn.Module):
                         _, grow_indices_grad = torch.topk(para_grad_tmp, n_grow_grad, largest=True)
 
                     if grow_indices_grad is not None:
-                        print('Grow (dir, grad)', len(grow_indices_dir), len(grow_indices_grad))
+                        print('Grow (WithDir, grad):', len(grow_indices_dir), len(grow_indices_grad))
                         grow_indices = torch.cat((grow_indices_dir, grow_indices_grad))
                     else:
                         _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)
@@ -434,7 +433,6 @@ class PrunableNet(nn.Module):
 
             # Copy over the params, masking them off if needed.
             for name, param in param_source.items():
-                param = param.to(self.device)
                 if name.endswith('_mask'):
                     # skip masks, since we will copy them with their corresponding
                     # layers, from the mask source.
@@ -445,6 +443,7 @@ class PrunableNet(nn.Module):
                     mask_to_apply = apply_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     mask_to_copy = copy_mask_source[mask_name].to(device=self.device, dtype=torch.bool)
                     gpu_param = param[mask_to_apply].to(self.device)
+
                     # copy weights provided by the weight source, where the mask
                     # permits them to be copied
                     new_state[name][mask_to_apply] = gpu_param
@@ -747,8 +746,7 @@ def resnet18(pretrained=False, *args, **kwargs):
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2],*args, **kwargs)
     if pretrained:
-        model.load_state_dict(torch.utils.model_zoo.load_url('https://download.pytorch.org/models/resnet18-f37072fd.pth', strict=False))
-        # model.load_state_dict(model_zoo.load_url(model_urls['resnet18']), strict=False)
+        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']), strict=False)
     return model
 
 
