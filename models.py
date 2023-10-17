@@ -151,7 +151,7 @@ class PrunableNet(nn.Module):
             return ret
 
 
-    def layer_prune(self, sparsity=0.1, sparsity_distribution='erk', dire_ratio = 0.1, global_directions={}):
+    def layer_prune(self, sparsity=0.1, sparsity_distribution='erk', dire_ratio = 0.1, global_directions={}, client_grad_directions={}):
         '''
         Prune the network to the desired sparsity, following the specified
         sparsity distribution. The weight magnitude is used for pruning.
@@ -193,9 +193,12 @@ class PrunableNet(nn.Module):
 
                     same_directions = []
                     if param.grad is not None and len(global_directions) > 0:
-                        grad_direction = torch.sign(param.grad.flatten())
+                        # grad_direction = torch.sign(param.grad.flatten())
+                        grad_direction = client_grad_directions[name+'.'+pname].flatten().to(self.device)
                         x = global_directions[name+'.'+pname].flatten().to(self.device)
                         same_directions = (grad_direction == x)
+                        diff_directions_count = torch.sum(~same_directions)
+                        print_to_log(f'Client-Global GradDiffCount {diff_directions_count}/{len(same_directions)}', log_file=self.global_args.log_file)
 
                     n_prune_weight, n_prune_dir = n_prune, 0
                     prune_indices_dir = None
@@ -208,7 +211,7 @@ class PrunableNet(nn.Module):
                             paradata_tmp = torch.abs(param.data.flatten())
                             paradata_tmp[same_directions] = 999999
                             _, prune_indices_dir = torch.topk(paradata_tmp, n_prune_dir, largest=False)
-
+                    print_to_log(f'PruneGuideByDirection {n_prune_dir}', log_file=self.global_args.log_file)
                     prune_indices_weight = None
                     if prune_indices_dir is not None:
                         paradata_tmp = torch.abs(param.data.flatten())
@@ -216,7 +219,7 @@ class PrunableNet(nn.Module):
                         _, prune_indices_weight = torch.topk(paradata_tmp, n_prune_weight, largest=False)
 
                     if prune_indices_weight is not None:
-                        print_to_log('Prune (WithDir, weight): ', len(prune_indices_dir), len(prune_indices_weight))
+                        print_to_log(f'Prune (ByDir:{len(prune_indices_dir)}, ByWeight{len(prune_indices_weight)})', log_file=self.global_args.log_file)
                         prune_indices = torch.cat((prune_indices_dir, prune_indices_weight))
                     else:
                         _, prune_indices = torch.topk(torch.abs(param.data.flatten()), n_prune, largest=False)
@@ -228,7 +231,7 @@ class PrunableNet(nn.Module):
             #print('pruned sparsity', self.sparsity())
 
 
-    def layer_grow(self, sparsity=0.1, sparsity_distribution='erk', dire_ratio = 0.1, global_directions={}):
+    def layer_grow(self, sparsity=0.1, sparsity_distribution='erk', dire_ratio = 0.1, global_directions={}, client_grad_directions={}):
         '''
         Grow the network to the desired sparsity, following the specified
         sparsity distribution.
@@ -251,7 +254,7 @@ class PrunableNet(nn.Module):
                 n_grow = int(weights_by_layer[name] - n_nonzero) # 期望的非0参数的个数
                 if n_grow < 0:
                     continue
-                print('Grow (total)', name, n_grow)
+                print_to_log(f'Grow (total): {name}, {n_grow}', log_file=self.global_args.log_file)
 
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
@@ -268,9 +271,11 @@ class PrunableNet(nn.Module):
 
                     same_directions = []
                     if param.grad is not None and len(global_directions) > 0:
-                        grad_direction = torch.sign(param.grad.flatten())
+                        # grad_direction = torch.sign(param.grad.flatten())
+                        grad_direction = client_grad_directions[name+'.'+pname].flatten().to(self.device)
                         x = global_directions[name+'.'+pname].flatten().to(self.device)
                         same_directions = (grad_direction == x)
+                    print_to_log(f'Client-Global GradSameCount {torch.sum(same_directions)}/{len(same_directions)}', log_file=self.global_args.log_file)
 
                     n_grow_grad, n_grow_dir, grow_indices_dir = n_grow, 0, None
                     if len(same_directions) > 0:
@@ -289,7 +294,7 @@ class PrunableNet(nn.Module):
                         _, grow_indices_grad = torch.topk(para_grad_tmp, n_grow_grad, largest=True)
 
                     if grow_indices_grad is not None:
-                        print('Grow (WithDir, grad):', len(grow_indices_dir), len(grow_indices_grad))
+                        print_to_log(f'Grow (ByDir:{len(grow_indices_dir)}, ByGrad:{len(grow_indices_grad)})', log_file=self.global_args.log_file)
                         grow_indices = torch.cat((grow_indices_dir, grow_indices_grad))
                     else:
                         _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)

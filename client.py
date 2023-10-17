@@ -66,13 +66,13 @@ class Client:
         return sum(len(x) for x in self.train_data)
 
 
-    # 这里的这个 initial_global_params 似乎没啥用，据说是给 PruneFL 的实现使用的
+    # 这里的这个 initial_global_params 似乎没啥用，据说是给 PruneFL 的实现使用的, 其他情况主要用的还是 global_parmas。
     def train(self, global_params=None, initial_global_params=None,
               readjustment_ratio=0.5, readjust=False, sparsity=0.0, global_params_direction={}):
         '''Train the client network for a single round.'''
 
         ul_cost = 0
-        dl_cost = 0
+        dl_cost = 0 
         if global_params:
             # this is a FedAvg-like algorithm, where we need to reset
             # the client's weights every round
@@ -129,10 +129,19 @@ class Client:
                 outputs = self.net(inputs)
                 self.criterion(outputs, labels).backward()
 
+                client_pseudo_grad_direction={}
+                cur_client_state=self.net.state_dict()
+                for name, _ in cur_client_state.items():
+                    if not name.endswith('_mask'):
+                        delta_weight = cur_client_state[name] - global_params[name]
+                        client_pseudo_grad_direction[name] = torch.sign(delta_weight)
+
                 self.net.layer_prune(sparsity=prune_sparsity, sparsity_distribution=self.global_args.sparsity_distribution, 
-                                     dire_ratio = self.global_args.direction_ratio, global_directions=global_params_direction)
+                                     dire_ratio = self.global_args.direction_ratio, global_directions=global_params_direction,
+                                     client_grad_directions=client_pseudo_grad_direction)
                 self.net.layer_grow(sparsity=sparsity, sparsity_distribution=self.global_args.sparsity_distribution,
-                                    dire_ratio = self.global_args.direction_ratio, global_directions=global_params_direction)
+                                    dire_ratio = self.global_args.direction_ratio, global_directions=global_params_direction,
+                                    client_grad_directions=client_pseudo_grad_direction)
                 ul_cost += (1-self.net.sparsity()) * self.net.mask_size # need to transmit mask, unit: bit
             self.curr_epoch += 1
 
