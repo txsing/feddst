@@ -2,8 +2,9 @@ sp=$1
 mu=$2
 dir=$3
 gpu=$4
+label=$5
 
-rounds=300
+rounds=10
 epochs=3
 total_clients=100
 rd_clients=10
@@ -19,4 +20,4 @@ python dst.py \
  --pruning-begin 9 --pruning-interval 3 \
  -d $dir \
  --prox ${mu} \
- -o cifar10-noniid-E${epochs}R${rounds}-prox${mu}-s${sp}r0.1-dir${dir}-10_9_3 --device $gpu
+ -o cifar10-noniid-E${epochs}R${rounds}-prox${mu}-s${sp}r0.1-dir${dir}-10_9_3-${label} --device $gpu

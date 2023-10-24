@@ -1,13 +1,14 @@
-dir=$1
-sp=$2
+sp=$1
+dir=$2
 gpu=$3
+label=$4
 python dst.py \
  --dataset pacs \
- --source photo art_painting cartoon --target sketch \
+ --source photo cartoon art_painting --target sketch \
  --lr 0.001 \
  --clients 3 \
- --rounds 40 --rounds-between-readjustments 10 \
+ --rounds 30 --rounds-between-readjustments 10 \
  --sparsity $sp --readjustment-ratio 0.01 \
- --pruning-begin 9 --pruning-interval 2 -E 2 \
+ --pruning-begin 1 --pruning-interval 1 -E 1 \
  -d $dir \
- -o pacs-Ts-res18-E2R40-feddst-s${sp}r0.01-dir${dir} --device $gpu
+ -o pacs-Ts-res18-E2R40-feddst-s${sp}r0.01-dir${dir}-${label} --device $gpu

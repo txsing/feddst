@@ -585,24 +585,38 @@ class CIFAR10Net(PrunableNet):
     def __init__(self, classes=10, *args, **kwargs):
         super(CIFAR10Net, self).__init__(*args, **kwargs)
 
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.conv2 = nn.Conv2d(6, 16, 5)
+        # self.conv1 = nn.Conv2d(3, 6, 5)
+        # self.conv2 = nn.Conv2d(6, 16, 5)
 
-        self.fc1 = nn.Linear(16 * 20 * 20, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+        # self.fc1 = nn.Linear(16 * 20 * 20, 120)
+        # self.fc2 = nn.Linear(120, 84)
+        # self.fc3 = nn.Linear(84, 10)
+        self.conv1 = nn.Conv2d(3,  32, 3)
+        self.conv2 = nn.Conv2d(32, 64, 3)
+        self.conv3 = nn.Conv2d(64, 64, 3)
+
+
+        self.fc1 = nn.Linear(1024, 64)
+        self.fc2 = nn.Linear(64, 10)
 
         self.init_param_sizes()
 
 
     def forward(self, x):
-        x = F.relu(F.max_pool2d(self.conv1(x), 3, stride=1))
-        x = F.relu(F.max_pool2d(self.conv2(x), 3, stride=1))
-        x = x.view(-1, self.num_flat_features(x))
+        # x = F.relu(F.max_pool2d(self.conv1(x), 3, stride=1))
+        # x = F.relu(F.max_pool2d(self.conv2(x), 3, stride=1))
+        # x = x.view(-1, self.num_flat_features(x))
+        # x = F.relu(self.fc1(x))
+        # x = F.relu(self.fc2(x))
+        # x = F.softmax(self.fc3(x), dim=1)
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, stride=1))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, stride=1))
+        x = F.relu(self.conv3(x))
+        x = x.view(-1,1024)
         x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.softmax(self.fc3(x), dim=1)
+        x = F.softmax(self.fc2(x), dim=1)
         return x
+
 class CIFAR100Net(PrunableNet):
 
     def __init__(self, classes=100, *args, **kwargs):
@@ -744,7 +758,7 @@ class ResNet(PrunableNet):
         # layers_output_dict['fc']=out
         return out
 
-def resnet18(pretrained=False, *args, **kwargs):
+def resnet18(pretrained=True, *args, **kwargs):
     """Constructs a ResNet-18 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
@@ -753,9 +767,6 @@ def resnet18(pretrained=False, *args, **kwargs):
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls['resnet18']), strict=False)
     return model
-
-
-
 
 class VggNet(PrunableNet):
     def __init__(self, *args, classes=7, vgg_no='vgg11', **kwargs):

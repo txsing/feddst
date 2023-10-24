@@ -10,11 +10,11 @@ python dst.py \
  --distribution noniid \
  --lr 0.01 \
  -K 100 -C 20 \
- -R 10 -E 10 \
+ -R 200 -E 10 \
  --rounds-between-readjustments 10 \
  --sparsity $sp --readjustment-ratio ${r} \
  --pruning-begin 9 --pruning-interval 10 \
  -d $dir \
  --prox ${mu} \
- -o mnist-noniid-K100C20-E10R400-prox${mu}-s${sp}r${r}-dir${dir}-${label} --device $gpu
+ -o mnist-noniid-K100C20-E10R200-prox${mu}-s${sp}r${r}-dir${dir}-${label} --device $gpu
 

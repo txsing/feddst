@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import copy
+from copy import deepcopy
 
 import models
 from models import all_models, needs_mask, initialize_mask
@@ -68,9 +70,8 @@ class Client:
 
     # 这里的这个 initial_global_params 似乎没啥用，据说是给 PruneFL 的实现使用的, 其他情况主要用的还是 global_parmas。
     def train(self, global_params=None, initial_global_params=None,
-              readjustment_ratio=0.5, readjust=False, sparsity=0.0, global_params_direction={}):
+              readjustment_ratio=0.5, readjust=False, sparsity=0.0, global_params_direction={}, eval=False):
         '''Train the client network for a single round.'''
-
         ul_cost = 0
         dl_cost = 0 
         if global_params:
@@ -92,13 +93,9 @@ class Client:
                 # all parameters that don't have a mask (e.g. biases in this case)
                 dl_cost += (1-self.net.sparsity()) * self.net.mask_size * 32 + (self.net.param_size - self.net.mask_size * 32)
 
-        #pre_training_state = {k: v.clone() for k, v in self.net.state_dict().items()}
         for epoch in range(self.local_epochs):
-
             self.net.train()
-
             running_loss = 0.
-
             for i, (inputs, labels) in enumerate(self.train_data):
                 if self.global_args.drill and i >= 3:
                     print_to_log(f'drill training: Client-{self.id}', log_file=self.global_args.log_file)
@@ -150,10 +147,18 @@ class Client:
             ul_cost += (1-self.net.sparsity()) * self.net.mask_size * 16 + (self.net.param_size - self.net.mask_size * 16)
         else:
             ul_cost += (1-self.net.sparsity()) * self.net.mask_size * 32 + (self.net.param_size - self.net.mask_size * 32)
-        ret = dict(state=self.net.state_dict(), dl_cost=dl_cost, ul_cost=ul_cost)
+        if eval:
+            print(f'Client-{self.id} wiht trainsize: {self.train_size()}, Acc {self.test()}')
 
-        #dprint(global_params['conv1.weight_mask'][0, 0, 0], '->', self.net.state_dict()['conv1.weight_mask'][0, 0, 0])
-        #dprint(global_params['conv1.weight'][0, 0, 0], '->', self.net.state_dict()['conv1.weight'][0, 0, 0])
+        # raw_state = deepcopy(self.net.state_dict())
+        v = torch.nn.utils.parameters_to_vector(self.net.parameters())
+        v = v * self.train_size()
+        torch.nn.utils.vector_to_parameters(v, self.net.parameters())
+        scaled_state = self.net.state_dict()
+        for key, val in scaled_state.items():
+            if key.endswith('running_mean') or key.endswith('running_var'):
+                scaled_state[key] *= self.train_size()
+        ret = dict(scaled_state=self.net.state_dict(), dl_cost=dl_cost, ul_cost=ul_cost) #,raw_state=raw_state)
         return ret
 
     def test(self, model=None, n_batches=0):
