@@ -4,8 +4,8 @@ dir=$3
 gpu=$4
 label=$5
 
-rounds=10
-epochs=3
+rounds=200
+epochs=100
 total_clients=100
 rd_clients=10
 
@@ -17,7 +17,7 @@ python dst.py \
  -R ${rounds} -E ${epochs} \
  --rounds-between-readjustments 10 \
  --sparsity $sp --readjustment-ratio 0.1 \
- --pruning-begin 9 --pruning-interval 3 \
+ --pruning-begin 10 --pruning-interval 15 \
  -d $dir \
  --prox ${mu} \
  -o cifar10-noniid-E${epochs}R${rounds}-prox${mu}-s${sp}r0.1-dir${dir}-10_9_3-${label} --device $gpu

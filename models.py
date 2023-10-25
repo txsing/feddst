@@ -609,8 +609,8 @@ class CIFAR10Net(PrunableNet):
         # x = F.relu(self.fc1(x))
         # x = F.relu(self.fc2(x))
         # x = F.softmax(self.fc3(x), dim=1)
-        x = F.relu(F.max_pool2d(self.conv1(x), 2, stride=1))
-        x = F.relu(F.max_pool2d(self.conv2(x), 2, stride=1))
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, stride=2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, stride=2))
         x = F.relu(self.conv3(x))
         x = x.view(-1,1024)
         x = F.relu(self.fc1(x))
@@ -851,7 +851,7 @@ def vgg16(pretrained=False, *args, **kwargs):
 all_models = {
         'mnist': MNISTNet,
         'emnist': Conv2,
-        'cifar10': vgg11,
+        'cifar10': CIFAR10Net,
         'cifar100': vgg16,
         'pacs': resnet18,
         'office': resnet18,

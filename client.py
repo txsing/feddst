@@ -93,7 +93,8 @@ class Client:
                 # all parameters that don't have a mask (e.g. biases in this case)
                 dl_cost += (1-self.net.sparsity()) * self.net.mask_size * 32 + (self.net.param_size - self.net.mask_size * 32)
 
-        for epoch in range(self.local_epochs):
+        for epoch in range(1, self.local_epochs + 1):
+            self.curr_epoch += 1
             self.net.train()
             running_loss = 0.
             for i, (inputs, labels) in enumerate(self.train_data):
@@ -115,9 +116,11 @@ class Client:
                 # if i % 10 == 0:
                 #     print(f"iteration: {i}, loss: {loss.item()}")
                 running_loss += loss.item()
-            if readjust:
-                print('client-'+str(self.id), self.curr_epoch)
-            if self.curr_epoch >= self.global_args.pruning_begin and (self.curr_epoch - self.global_args.pruning_begin) % self.global_args.pruning_interval == 0 and readjust:
+
+            if readjust \
+                and self.curr_epoch >= self.global_args.pruning_begin \
+                and ((self.curr_epoch - self.global_args.pruning_begin) % self.global_args.pruning_interval == 1):
+
                 prune_sparsity = sparsity + (1 - sparsity) * readjustment_ratio
                 # recompute gradient if we used FedProx penalty
                 print_to_log(f"Client-{self.id} start-pruning, sparsity: {prune_sparsity}, epoch: {self.curr_epoch}", 
@@ -140,7 +143,6 @@ class Client:
                                     dire_ratio = self.global_args.direction_ratio, global_directions=global_params_direction,
                                     client_grad_directions=client_pseudo_grad_direction)
                 ul_cost += (1-self.net.sparsity()) * self.net.mask_size # need to transmit mask, unit: bit
-            self.curr_epoch += 1
 
         # we only need to transmit the masked weights and all biases
         if self.global_args.fp16:

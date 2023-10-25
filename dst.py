@@ -89,7 +89,7 @@ devices = [torch.device(x) for x in args.device] if torch.cuda.is_available() el
 args.pid = os.getpid()
 
 if args.rate_decay_end is None:
-    args.rate_decay_end = args.rounds // 2
+    args.rate_decay_end = int(args.rounds / 3) * 2
 if args.final_sparsity is None:
     args.final_sparsity = args.sparsity
 if args.sparsity <= 0 :
@@ -299,12 +299,12 @@ def check_weight_val(vals, votes, label='', name='conv1.weight'):
 sys_rd_time = time.process_time()
 print(f'Inital global acc: {evaluate_global_model(global_model, loaders).item()}!')
 # print(f"[TRACE] Initization done!: {sys_rd_time-sys_t0}s")
-for server_round in range(args.rounds): # 默认 400
+for server_round in range(1, args.rounds+1): # 默认 400
     sys_rd_time = time.process_time()
     # print(f"[TRACE] round {server_round} starts!")
     # sample clients
     client_indices = rng.choice(list(client_ids), size=args.clients, replace=False)
-    print_to_log(f"Selected clients: {client_indices} at round {server_round+1}")
+    print_to_log(f"Selected clients: {client_indices} at round {server_round}")
     global_state_pre_rd = deepcopy(global_model.state_dict())
 
     select_clients_trainsize_in_total = sum(client_traindata_sizes[i] for i in client_indices)
@@ -342,15 +342,17 @@ for server_round in range(args.rounds): # 默认 400
     # for each client k \in S_t in parallel do    
     readjustment_ratio = args.readjustment_ratio
     if args.rate_decay_method == 'cosine':
-        readjustment_ratio = args.readjustment_ratio * global_model._decay(server_round, alpha=args.readjustment_ratio, t_end=args.rate_decay_end)
-    readjust = (server_round - 1) % args.rounds_between_readjustments == 0 and readjustment_ratio > 0. # bool 值
+        readjustment_ratio = global_model._decay(server_round, alpha=args.readjustment_ratio, t_end=args.rate_decay_end)
+    readjust = (server_round>=args.rounds_between_readjustments) \
+                and (server_round % args.rounds_between_readjustments == 0) \
+                and (readjustment_ratio > 0)
 
-    # determine sparsity desired at the end of this round
-    # ...via linear interpolation
+    # 其实如果 args.sparsity = args.final_sparsity 的话
+    # round_sparsity 就直接等于 sparsity
     if server_round <= args.rate_decay_end:
         round_sparsity = args.sparsity * (args.rate_decay_end - server_round) / args.rate_decay_end + args.final_sparsity * server_round / args.rate_decay_end
     else:
-        round_sparsity = args.final_sparsity
+        round_sparsity = args.sparsity
     if readjust:
         print_to_log(f'R-{server_round}: S.S:{round_sparsity}; ReAdjust:{readjustment_ratio}')
 
@@ -396,7 +398,7 @@ for server_round in range(args.rounds): # 默认 400
                                     readjustment_ratio=readjustment_ratio,
                                     readjust=readjust, sparsity=round_sparsity, 
                                     global_params_direction=global_params_direction, eval=True)
-        client_epochs[client_id] = client_epochs[client_id] + 1
+        client_epochs[client_id] = client.curr_epoch
         scaled_client_state = train_result['scaled_state'] # with mask_name
 
         download_cost[i] = train_result['dl_cost']
@@ -406,13 +408,14 @@ for server_round in range(args.rounds): # 默认 400
 
         time_cur_client_train_end = time.process_time()
         compute_times[i] = time_cur_client_train_end - time_cur_client_train_start
-        print(f"[TRACE] Client-{client_id}'s {client_epochs[client_id]} ep train done, { compute_times[i]}s")
+        print(f"[TRACE] Client-{client_id}'s {client_epochs[client_id]} ep train done, {int(compute_times[i])}s")
         client.net.clear_gradients() # to save memory
+        if args.drill:
+            continue
 
         # add this client's params to the aggregate
         cl_scaled_weight_all_params = {} # key 是所有的 param_name， value 是 weight
         cl_mask_params_needmsk = {} # key 是需要mask的 param_name （不是 mask_name）， value 是 mask
-
         # first deduce masks for the received weights
         # 这里 state 包括了 mask 和实际的 weight_val
         # 这段做的事情就是，把这俩分开，cl_scaled_weight_all_params 就只有 weight，cl_mask_params_needmsk里只有mask
@@ -514,7 +517,7 @@ for server_round in range(args.rounds): # 默认 400
 
     global_model.load_state_dict(aggregated_state) # 这次所有的 bias 啥的都 load进去了
     time_global_agg_done = time.process_time()
-    print(f"[TRACE] Central aggregation done, {time_global_agg_done-time_all_client_end}s")
+    # print(f"[TRACE] Central aggregation done, {time_global_agg_done-time_all_client_end}s")
 
     # evaluate performance
     torch.cuda.empty_cache()
@@ -556,7 +559,7 @@ for server_round in range(args.rounds): # 默认 400
         compute_times[:] = 0
         download_cost[:] = 0
         upload_cost[:] = 0
-    print(f"[TRACE] Central evaluation done, {time.process_time()-time_global_agg_done}s")
+    # print(f"[TRACE] Central evaluation done, {time.process_time()-time_global_agg_done}s")
 
 flog.close()
 fcsv.close()
