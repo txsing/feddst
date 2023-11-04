@@ -13,8 +13,8 @@ python dst.py \
  --source ${sources} --target $target \
  --lr 0.001 \
  --clients 3 \
- --rounds 30 --rounds-between-readjustments 10 \
+ --rounds 30 --rounds-between-readjustments  8\
  --sparsity $sp --readjustment-ratio 0.01 \
- --pruning-begin 1 --pruning-interval 1 -E 2 \
+ --pruning-begin 0 --pruning-interval 2 -E 2 \
  -d $dir \
- -o pacs-Ts-res18-E2R40-feddst-s${sp}r0.01-dir${dir}-${label} --device $gpu
+ -o pacs-T$target-res18-E2R40-feddst-s${sp}r0.01-dir${dir}-${label} --device $gpu

@@ -235,7 +235,7 @@ client_traindata_sizes = {}
 
 for i, (client_id, cl_loaders) in enumerate(clients_loaders_map):
     device, train_data, test_data = cl_loaders
-    cl_train_size = sum(len(x) for x in cl_loaders[1])
+    cl_train_size = sum(x[1].shape[0] for x in cl_loaders[1])
     print(f"Client-{client_id}: {cl_train_size} samples, {len(train_data)} iters/epoch")
 
     client_ids.append(client_id)
@@ -514,7 +514,6 @@ for server_round in range(1, args.rounds+1): # 默认 400
         new_mask = cur_global_state[name+'_mask']
         aggregated_state[name+'_mask'] = new_mask
         aggregated_state[name][~new_mask] = 0
-
     global_model.load_state_dict(aggregated_state) # 这次所有的 bias 啥的都 load进去了
     time_global_agg_done = time.process_time()
     # print(f"[TRACE] Central aggregation done, {time_global_agg_done-time_all_client_end}s")

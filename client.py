@@ -65,7 +65,7 @@ class Client:
 
 
     def train_size(self):
-        return sum(len(x) for x in self.train_data)
+        return sum(x[1].shape[0] for x in self.train_data)
 
 
     # 这里的这个 initial_global_params 似乎没啥用，据说是给 PruneFL 的实现使用的, 其他情况主要用的还是 global_parmas。
@@ -96,7 +96,6 @@ class Client:
         for epoch in range(1, self.local_epochs + 1):
             self.curr_epoch += 1
             self.net.train()
-            running_loss = 0.
             for i, (inputs, labels) in enumerate(self.train_data):
                 if self.global_args.drill and i >= 3:
                     print_to_log(f'drill training: Client-{self.id}', log_file=self.global_args.log_file)
@@ -115,16 +114,19 @@ class Client:
                 self.reset_weights() # applies the mask, without changing weights.
                 # if i % 10 == 0:
                 #     print(f"iteration: {i}, loss: {loss.item()}")
-                running_loss += loss.item()
 
-            if readjust \
+            client_readjust = readjust \
                 and self.curr_epoch >= self.global_args.pruning_begin \
-                and ((self.curr_epoch - self.global_args.pruning_begin) % self.global_args.pruning_interval == 1):
-
+                and ((self.curr_epoch - self.global_args.pruning_begin) % self.global_args.pruning_interval == 1)
+            print(f"GloalReAdjust {readjust}, ClientReAdjust {client_readjust}, ep {self.curr_epoch}")
+            if client_readjust:
                 prune_sparsity = sparsity + (1 - sparsity) * readjustment_ratio
                 # recompute gradient if we used FedProx penalty
-                print_to_log(f"Client-{self.id} start-pruning, sparsity: {prune_sparsity}, epoch: {self.curr_epoch}", 
+                print_to_log(f"Client-{self.id} start-pruning, prune-sparsity: {prune_sparsity}/{sparsity}, epoch: {self.curr_epoch}", 
                              log_file=self.global_args.log_file)
+                inputs = inputs.to(self.device)
+                labels = labels.to(self.device)
+
                 self.optimizer.zero_grad()
                 outputs = self.net(inputs)
                 self.criterion(outputs, labels).backward()
@@ -150,7 +152,7 @@ class Client:
         else:
             ul_cost += (1-self.net.sparsity()) * self.net.mask_size * 32 + (self.net.param_size - self.net.mask_size * 32)
         if eval:
-            print(f'Client-{self.id} wiht trainsize: {self.train_size()}, Acc {self.test()}')
+            print(f'Client-{self.id} with trainsize: {self.train_size()}, Acc {self.test()}, S {self.sparsity()}')
 
         # raw_state = deepcopy(self.net.state_dict())
         v = torch.nn.utils.parameters_to_vector(self.net.parameters())

@@ -192,7 +192,7 @@ class PrunableNet(nn.Module):
                         continue
 
                     same_directions = []
-                    if param.grad is not None and len(global_directions) > 0:
+                    if len(global_directions) > 0:
                         # grad_direction = torch.sign(param.grad.flatten())
                         grad_direction = client_grad_directions[name+'.'+pname].flatten().to(self.device)
                         x = global_directions[name+'.'+pname].flatten().to(self.device)
@@ -259,7 +259,6 @@ class PrunableNet(nn.Module):
                 for pname, param in layer.named_parameters():
                     if not needs_mask(pname):
                         continue
-
                     # Determine smallest indices
                     if dire_ratio <= 0.0:
                         _, grow_indices = torch.topk(torch.abs(param.grad.flatten()), n_grow, largest=True)
@@ -268,15 +267,13 @@ class PrunableNet(nn.Module):
                             if bname == pname + '_mask':
                                 buf.view(buf.numel())[grow_indices] = 1
                         continue
-
                     same_directions = []
                     if param.grad is not None and len(global_directions) > 0:
                         # grad_direction = torch.sign(param.grad.flatten())
                         grad_direction = client_grad_directions[name+'.'+pname].flatten().to(self.device)
                         x = global_directions[name+'.'+pname].flatten().to(self.device)
                         same_directions = (grad_direction == x)
-                    print_to_log(f'Client-Global GradSameCount {torch.sum(same_directions)}/{len(same_directions)}', log_file=self.global_args.log_file)
-
+                        print_to_log(f'Client-Global GradSameCount {torch.sum(same_directions)}/{len(same_directions)}', log_file=self.global_args.log_file)
                     n_grow_grad, n_grow_dir, grow_indices_dir = n_grow, 0, None
                     if len(same_directions) > 0:
                         same_directions_count = torch.sum(same_directions)
@@ -538,7 +535,6 @@ class PrunableNet(nn.Module):
 
 
     def sparsity(self, buffers=None):
-
         if buffers is None:
             buffers = self.named_buffers()
 
@@ -549,7 +545,6 @@ class PrunableNet(nn.Module):
                 # print(name, torch.sum(buf), buf.nelement())
                 n_ones += torch.sum(buf)
                 mask_size += buf.nelement()
-
         return 1 - (n_ones / mask_size).item()
 
 
@@ -758,7 +753,7 @@ class ResNet(PrunableNet):
         # layers_output_dict['fc']=out
         return out
 
-def resnet18(pretrained=True, *args, **kwargs):
+def resnet18(pretrained=False, *args, **kwargs):
     """Constructs a ResNet-18 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
