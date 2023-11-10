@@ -15,6 +15,16 @@ from datasets import get_dataset
 from client import Client
 from models import all_models, needs_mask, initialize_mask
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
 
 def device_list(x):
     if x == 'cpu' or x == 'mps':
@@ -24,6 +34,7 @@ def device_list(x):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--lr', type=float, help='learning rate', default=0.01)
+parser.add_argument('--adam', type=str2bool, nargs='?',const=True, default=False)
 parser.add_argument('-C', '--clients', type=int, help='number of clients per round', default=20)
 parser.add_argument('-R', '--rounds', type=int, help='number of global rounds', default=400)
 parser.add_argument('-E','--epochs', type=int, help='number of local epochs', default=10)
@@ -49,7 +60,7 @@ parser.add_argument('--pruning-begin', type=int, default=9, help='first epoch nu
 parser.add_argument('--pruning-interval', type=int, default=10, help='epochs between readjustments')
 parser.add_argument('--rounds-between-readjustments', type=int, default=10, help='rounds between readjustments')
 parser.add_argument('--remember-old', default=False, action='store_true', help="remember client's old weights when aggregating missing ones")
-parser.add_argument('--drill', default=False, action='store_true', help="drill run for quick testing")
+parser.add_argument('--drill', type=str2bool, nargs='?',const=True, default=False, help="dill run")
 parser.add_argument('--sparsity-distribution', default='erk', choices=('uniform', 'er', 'erk'))
 parser.add_argument('--final-sparsity', type=float, default=None, help='final sparsity to grow to, from 0 to 1. default is the same as --sparsity')
 

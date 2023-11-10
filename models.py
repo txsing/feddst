@@ -753,13 +753,14 @@ class ResNet(PrunableNet):
         # layers_output_dict['fc']=out
         return out
 
-def resnet18(pretrained=False, *args, **kwargs):
+def resnet18(pretrained=True, *args, **kwargs):
     """Constructs a ResNet-18 model.
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
     """
     model = ResNet(BasicBlock, [2, 2, 2, 2],*args, **kwargs)
     if pretrained:
+        print("Using Pretrained ResNet18")
         model.load_state_dict(model_zoo.load_url(model_urls['resnet18']), strict=False)
     return model
 
@@ -846,6 +847,7 @@ def vgg16(pretrained=False, *args, **kwargs):
 all_models = {
         'mnist': MNISTNet,
         'emnist': Conv2,
+        # 'cifar10': vgg11,
         'cifar10': CIFAR10Net,
         'cifar100': vgg16,
         'pacs': resnet18,

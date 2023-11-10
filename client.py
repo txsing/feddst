@@ -53,7 +53,12 @@ class Client:
 
 
     def reset_optimizer(self):
-        self.optimizer = torch.optim.SGD(self.net.parameters(), lr=self.learning_rate, momentum=self.global_args.momentum, weight_decay=self.global_args.l2)
+        if self.global_args.adam:
+            print_to_log(f'Using Adam: Client-{self.id}', log_file=self.global_args.log_file)
+            self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
+        else:
+            print_to_log(f'Using SGD: Client-{self.id}', log_file=self.global_args.log_file)
+            self.optimizer = torch.optim.SGD(self.net.parameters(), lr=self.learning_rate, momentum=self.global_args.momentum, weight_decay=self.global_args.l2)
 
 
     def reset_weights(self, *args, **kwargs):

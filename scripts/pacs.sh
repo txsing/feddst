@@ -3,18 +3,29 @@ sp=$2
 dir=$3
 gpu=$4
 label=$5
+ratio=$6
 
 pacs=('photo' 'art_painting' 'cartoon' 'sketch')
 srcdomains=($(comm -3 <(printf "%s\n" "${pacs[@]}" | sort) <(printf "%s\n" "${target[@]}" | sort) | sort -n))
 sources=$(printf '%s ' "${srcdomains[@]}")
+
+epochs=2
+rounds=40
+#ratio=0.1
+X=7
+Y=0
+Z=2
+
+ologfile=pacs-T$target-res18-E${epochs}R${rounds}-${X}_${Y}_${Z}-feddst-s${sp}r${ratio}-dir${dir}-${label}
+echo ${ologfile}
 
 python dst.py \
  --dataset pacs \
  --source ${sources} --target $target \
  --lr 0.001 \
  --clients 3 \
- --rounds 30 --rounds-between-readjustments  8\
- --sparsity $sp --readjustment-ratio 0.01 \
- --pruning-begin 0 --pruning-interval 2 -E 2 \
+ --rounds ${rounds} --rounds-between-readjustments $X \
+ --sparsity $sp --readjustment-ratio ${ratio} \
+ --pruning-begin $Y --pruning-interval $Z -E ${epochs} \
  -d $dir \
- -o pacs-T$target-res18-E2R40-feddst-s${sp}r0.01-dir${dir}-${label} --device $gpu
+ -o ${ologfile} --device $gpu
