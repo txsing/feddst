@@ -32,6 +32,7 @@ while true; do
     -T) rd_adjust=$2; shift 2 ;;
     -m) mu=$2; shift 2 ;;
     -d) dir=$2; shift 2 ;;
+    -g) gpu=$2; shift 2 ;;
     --) shift; break ;;
     *) echo "Invalid option: $1"; exit 1 ;;
   esac
